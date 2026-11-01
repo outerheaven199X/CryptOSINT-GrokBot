@@ -2,8 +2,10 @@
 // Grok The Block launcher. Node built-ins only. Serves dist/ui read-only on 127.0.0.1.
 // Static files: GET/HEAD only. The only other surface is the small /api/ in ../lib/investigate.mjs (same-origin, token-gated).
 // Reads exactly one secret, XAI_API_KEY, and only if it was set in the launch environment; never reads ~/.npmrc, ~/.ssh or
-// credential files. No network calls unless the user approves a Connected Grok request in the UI. No daemon.
-// Writes only the opt-in watchlist file in its own local state directory, and only after the user saves something.
+// credential files. No network calls unless the user presses Refresh or approves a Connected Grok request in the UI. No daemon.
+// Writes only under its own local state directory: the opt-in watchlist file (after the user saves something) and, when the
+// user presses Refresh, the refreshed snapshot (snapshot/). Refresh is the only other network use: keyless public providers on
+// a fixed host allow-list (see ../lib/refresh.mjs), only on request, never in the background.
 import { createServer } from "node:http";
 import { readFileSync, realpathSync, statSync, createReadStream } from "node:fs";
 import { join, sep, extname, dirname } from "node:path";
@@ -18,7 +20,7 @@ const TYPES = { ".html": "text/html; charset=utf-8", ".js": "text/javascript; ch
 const SEC = { "X-Content-Type-Options": "nosniff", "X-Frame-Options": "DENY", "Referrer-Policy": "no-referrer", "Cross-Origin-Opener-Policy": "same-origin", "Cross-Origin-Resource-Policy": "same-origin", "Cache-Control": "no-store", "Permissions-Policy": "camera=(), microphone=(), geolocation=(), usb=(), payment=()", "Content-Security-Policy": "frame-ancestors 'none'" };
 
 const HELP = `grok-the-block ${PKG.version}
-Local research preview of Grok The Block. Serves the bundled browser UI read-only on 127.0.0.1.
+Local research preview of Grok The Block. Serves the bundled browser UI on 127.0.0.1 only.
 
 Usage: grok-the-block [--no-open] [--port N] [--version] [--help]
   --no-open   print the URL but do not open a browser
@@ -28,7 +30,8 @@ Usage: grok-the-block [--no-open] [--port N] [--version] [--help]
 
 Optional: XAI_API_KEY in the environment (or a session-only key entered in the UI) enables Connected Grok. Nothing is
 sent to xAI until you approve the evidence packet in the UI; xAI bills your account for those requests.
-Watchlist state (opt-in): GTB_STATE_DIR, or the platform's local state directory.
+Refresh: press Refresh in Pulse to fetch today's data from keyless public providers (ECB, FRED, CFTC). Only when you ask.
+State (watchlist, refreshed snapshot, history): GTB_STATE_DIR, or the platform's local state directory.
 
 Not financial advice. No wallet, sign-in, telemetry or background network calls. Ctrl+C to stop.`;
 
@@ -90,14 +93,19 @@ function openBrowser(url) {
   } catch { return null; }
 }
 
-export function start({ root, port = 0, open = false, log = console.log, env = {}, stateDir = null, fetchImpl } = {}) {
+export function start({ root, port = 0, open = false, log = console.log, env = {}, stateDir = null, fetchImpl, refreshFetch } = {}) {
   root = realpathSync(root);
   const sockets = new Set();
-  const api = createApi({ env, stateDir, pkgRoot: join(HERE, ".."), log, fetchImpl });
+  const api = createApi({ env, stateDir, pkgRoot: join(HERE, ".."), root, log, fetchImpl, refreshFetch });
   const srv = createServer((req, res) => {
     const addr = srv.address();
     if (typeof req.url === "string" && (req.url === "/api" || req.url.startsWith("/api/"))) {
       return void api.handle(req, res, addr.port).catch(() => { if (!res.headersSent) { res.writeHead(500, { "Content-Type": "text/plain; charset=utf-8" }); res.end("500"); } });
+    }
+    // The last user-started refresh, as a data-only script (the static stub at the same path says "none yet").
+    if ((req.method === "GET" || req.method === "HEAD") && typeof req.url === "string" && req.url.split("?")[0] === "/data/refreshed.js" && allowedHost(req.headers.host, addr.port)) {
+      const js = api.refreshedJs();
+      if (js) { res.writeHead(200, { ...clean(SEC), "Content-Type": "text/javascript; charset=utf-8", "Content-Length": Buffer.byteLength(js), "Server-Timing": 'gtb;desc="launcher-api"' }); return res.end(req.method === "HEAD" ? undefined : js); }
     }
     const r = resolveRequest(root, req.method, req.url, req.headers.host, addr.port);
     if (r.redirect) { res.writeHead(302, { ...clean(SEC), Location: r.redirect }); return res.end(); }
@@ -120,6 +128,7 @@ export function start({ root, port = 0, open = false, log = console.log, env = {
       const url = `http://127.0.0.1:${srv.address().port}/`;
       log(`Grok The Block ${PKG.version} running at ${url}`);
       log("Local research preview. Not financial advice. Press Ctrl+C to stop.");
+      if (env.GTB_REFRESH_FIXTURES) log("Refresh: FIXTURE replay mode (GTB_REFRESH_FIXTURES). Refreshed observations are test data and labelled as such.");
       const g = api.status(); log(g.available ? "Grok: XAI_API_KEY found in the environment. Nothing is sent until you approve an evidence packet in the UI." : "Grok not connected (optional). Local-only mode.");
       if (open) child = openBrowser(url);
       ok(url);
@@ -143,7 +152,7 @@ function main() {
   if (o.help) { console.log(HELP); return; }
   if (o.version) { console.log(PKG.version); return; }
   const E = process.env, env = {};
-  for (const k of ["XAI_API_KEY", "GTB_XAI_BASE_URL", "GTB_XAI_MODEL"]) if (typeof E[k] === "string" && E[k]) env[k] = E[k];
+  for (const k of ["XAI_API_KEY", "GTB_XAI_BASE_URL", "GTB_XAI_MODEL", "GTB_REFRESH_FIXTURES"]) if (typeof E[k] === "string" && E[k]) env[k] = E[k];
   const app = start({ root: join(HERE, "..", "dist", "ui"), port: o.port, open: o.open, env, stateDir: defaultStateDir(E) });
   app.ready.catch(e => { console.error(e.code === "EADDRINUSE" ? `Port ${o.port} is already in use. Try another --port or omit it.` : `Could not start: ${e.message}`); process.exit(1); });
   let stopping = false;

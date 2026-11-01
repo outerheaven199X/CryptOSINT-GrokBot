@@ -24,8 +24,8 @@ def shot(pg, name, full=False):
     if SHOTS: SHOTS.mkdir(parents=True, exist_ok=True); pg.screenshot(path=str(SHOTS / name), full_page=full)
 
 class Harness:
-    def __init__(self, state, key=True):
-        self.p = subprocess.Popen(["node", str(R / "tests/ui/inv_harness.mjs"), "--state", state, "--key", "1" if key else "0", "--fake-key", FAKE], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, cwd=str(R))
+    def __init__(self, state, key=True, fixtures=None):
+        self.p = subprocess.Popen(["node", str(R / "tests/ui/inv_harness.mjs"), "--state", state, "--key", "1" if key else "0", "--fake-key", FAKE] + (["--fixtures", fixtures] if fixtures else []), stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, cwd=str(R))
         j = json.loads(self.p.stdout.readline()); self.port, self.mock = j["port"], j["mock"]; self.url = f"http://127.0.0.1:{self.port}/"
     def scenario(self, s): urlopen(Request(f"http://127.0.0.1:{self.mock}/__scenario", data=json.dumps({"scenario": s}).encode(), method="POST")).read()
     def stop(self):
@@ -125,7 +125,9 @@ with sync_playwright() as p:
     k = pg.evaluate("[...GTB.inv.index().keys()].find(k=>k.endsWith(':syn'))"); pg.evaluate(f"GTB.inv.open({json.dumps(k)})"); pg.wait_for_timeout(300)
     res("Demo off: synthetic deep link refuses to open", "need the Demo switch" in T(pg, "#panel"))
     pg.evaluate("GTB.go('watch')"); pg.wait_for_timeout(300)
-    res("static: watchlist explains it needs the launcher; refresh is snapshot-only with the manual command", "Watchlist unavailable" in T(pg, "#panel") and "build_everything.py --fetch" in T(pg, "#watchRefresh"))
+    res("static: watchlist explains it needs the launcher; Refresh needs the npx launcher, no Refresh button, no /api call", "Watchlist unavailable" in T(pg, "#panel") and "npx grok-the-block" in T(pg, "#watchRefresh") and pg.locator("[data-refresh]").count() == 0 and not st["api"])
+    wr = pg.evaluate("(()=>{const e=document.getElementById('watchRefresh');if(!e)return null;return [...e.querySelectorAll('*')].filter(n=>n.children.length===0&&n.textContent.trim()).some(n=>n.scrollWidth>n.clientWidth+1&&getComputedStyle(n).overflow!=='visible')})()")
+    res("static: watchlist refresh instructions are not clipped", wr is False, wr)
     # MTG printing identity
     pg.evaluate("GTB.goFeat('tcg.explorer')"); pg.wait_for_timeout(800)
     tk = pg.evaluate("(()=>{for(const g of (window.GTB_TCG_CACHE||{groups:[]}).groups)for(const p of g.printings)if(p.name==='Time Walk'&&p.tracked)return p.key;return null})()")
@@ -232,6 +234,36 @@ with sync_playwright() as p:
         pg.click("#wClear"); pg.wait_for_timeout(500)
         res("clear watchlist: local data removed", not (Path(STATE) / "watchlist.json").exists() and "Nothing saved yet" in T(pg, "#panel"))
         ctx.close()
+    finally:
+        Hn.stop()
+    # ---------------- 3b. Refresh (recorded real provider responses via GTB_REFRESH_FIXTURES; never the network) ----------------
+    RST = tempfile.mkdtemp(prefix="gtb-inv-refresh-")
+    Hn = Harness(RST, key=False, fixtures=str(R / "packages/cli/test/fixtures/providers-20261101"))
+    try:
+        ctx = b.new_context(viewport={"width": 1440, "height": 900}); pg = ctx.new_page(); st = watch(pg, Hn.url.rstrip("/")); boot(pg, Hn.url)
+        pg.evaluate("GTB.go('pulse')"); pg.wait_for_timeout(500)
+        res("refresh: Pulse shows a Refresh button under the launcher, bundled snapshot before any refresh", pg.locator("#pulseRefresh [data-refresh]").count() == 1 and "Bundled snapshot" in T(pg, "#pulseRefresh"))
+        with pg.expect_navigation(timeout=60000): pg.click("#pulseRefresh [data-refresh]")
+        pg.wait_for_function("window.GTB&&GTB.ready&&GTB.inv", timeout=30000); pg.evaluate("GTB.go('pulse')"); pg.wait_for_timeout(600)
+        outs = pg.evaluate("[...document.querySelectorAll('#pulseRefresh .rrun')].map(e=>[e.dataset.unit,e.dataset.outcome,e.dataset.freshness])")
+        res("refresh: fx, fx-h10, energy and cot fetched (fixture replay, labelled FIXTURE); others stay bundled", {u: o for u, o, f in outs if u in ("fx", "fx-h10", "energy", "cot")} == {"fx": "fetched", "fx-h10": "fetched", "energy": "fetched", "cot": "fetched"} and "FIXTURE" in T(pg, "#pulseRefresh"), outs)
+        res("refresh: EV.live swapped to the refreshed snapshot with the providers' own dates", pg.evaluate("(()=>{const E=GTB.EV;const c=(E.live.coverage||[]).find(c=>c.module===\"fx\");return !!(E.refreshed&&E.refreshed.fixture&&c&&c.sourceAsOf===\"2026-10-30\")})()"))
+        res("refresh: refreshed readings are listed, labelled FIXTURE (never 'refreshed'/live), with source dates and Investigate", pg.locator("#pulseReadings [data-prov='fixture'] [data-inv]").count() >= 1 and pg.locator("#panel [data-prov='refreshed']").count() == 0 and "source as of 2026-" in T(pg, "#pulseReadings"), T(pg, "#pulseReadings")[:300])
+        pg.click("#pulseReadings [data-inv] >> nth=0"); pg.wait_for_timeout(500)
+        res("refresh: investigating a refreshed reading shows the FIXTURE banner and the detector state", "FIXTURE" in T(pg, "#panel") and "below the detector threshold" in T(pg, "#panel"), T(pg, "#panel")[:300])
+        shot(pg, "16b-investigate-refreshed-fixture-desktop.png")
+        shot(pg, "16-pulse-after-refresh-fixture-desktop.png")
+        res("refresh: page made no off-origin requests (providers are called by the launcher)", not st["off"], st["off"][:3])
+        ctx.close()
+        ctx = b.new_context(viewport={"width": 390, "height": 844}); pg = ctx.new_page(); boot(pg, Hn.url); pg.evaluate("GTB.go('pulse')"); pg.wait_for_timeout(500)
+        top = pg.evaluate("(()=>{const r=document.querySelector('#panel [data-inv]');return r?r.getBoundingClientRect().top:9999})()")
+        res("390px Pulse: filters collapsed, first observation on the first screen", not pg.evaluate("document.getElementById('pFilt').open") and top < 844, top)
+        shot(pg, "17-pulse-390-after-refresh.png")
+        ctx.close()
+    finally:
+        Hn.stop()
+    Hn = Harness(STATE, key=False)
+    try:
         # ---------------- 4. viewports, reduced motion, no WebGL ----------------
         for w, h in [(1440, 900), (1920, 1080), (768, 1024), (390, 844), (375, 812), (320, 568)]:
             ctx = b.new_context(viewport={"width": w, "height": h}); pg = ctx.new_page(); st = watch(pg, Hn.url.rstrip("/")); boot(pg, Hn.url)

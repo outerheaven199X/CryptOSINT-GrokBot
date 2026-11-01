@@ -115,7 +115,7 @@ test("manifest: no lifecycle hooks, no dependencies, bin mapping, engines", () =
 test("launcher source: only allowlisted env reads, no home-dir or credential reads, no shell, no network clients", () => {
   const s = readFileSync(BIN, "utf8").replace(/^\s*\/\/.*$/gm, "");
   assert.equal((s.match(/process\.env/g) || []).length, 1, "exactly one process.env read");
-  assert.match(s, /for \(const k of \["XAI_API_KEY", "GTB_XAI_BASE_URL", "GTB_XAI_MODEL"\]\)/);
+  assert.match(s, /for \(const k of \["XAI_API_KEY", "GTB_XAI_BASE_URL", "GTB_XAI_MODEL", "GTB_REFRESH_FIXTURES"\]\)/);
   for (const bad of [/homedir/, /\.npmrc/, /\.ssh/, /shell:\s*true/, /exec\(/, /execSync/, /node:https/, /fetch\(/, /node:net/, /require\(/, /eval\(/]) assert.ok(!bad.test(s), String(bad));
 });
 test("investigate lib: no shell, eval, child processes, raw sockets or credential files; one fetch to the xAI base only", () => {
@@ -123,6 +123,13 @@ test("investigate lib: no shell, eval, child processes, raw sockets or credentia
   for (const bad of [/child_process/, /exec\(/, /execSync/, /spawn\(/, /eval\(/, /new Function/, /node:net/, /node:https?/, /["'`][^"'`\n]*\.(npmrc|ssh)\b/, /process\.env/, /require\(/]) assert.ok(!bad.test(s), String(bad));
   assert.equal((s.match(/fetchImpl\(/g) || []).length, 1); assert.match(s, /fetchImpl\(url \+ "\/responses"/);
   assert.match(s, /XAI_BASE = "https:\/\/api\.x\.ai\/v1"/);
+});
+test("refresh + watch libs: no shell, eval, child processes, raw sockets, env or credential reads; fetch only through the allow-listed httpGet", () => {
+  const r = readFileSync(join(PKG, "lib", "refresh.mjs"), "utf8").replace(/^\s*\/\/.*$/gm, ""), w = readFileSync(join(PKG, "lib", "watch.mjs"), "utf8").replace(/^\s*\/\/.*$/gm, "");
+  for (const s of [r, w]) for (const bad of [/child_process/, /exec\(/, /execSync/, /spawn\(/, /eval\(/, /new Function/, /node:net/, /node:https?/, /node:dgram/, /["'`][^"'`\n]*\.(npmrc|ssh)\b/, /process\.env/, /require\(/, /homedir/, /setInterval\(/]) assert.ok(!bad.test(s), String(bad));
+  assert.equal((r.match(/fetchImpl\(/g) || []).length, 1, "exactly one network call site"); assert.match(r, /if \(u\.protocol !== "https:" \|\| !ALLOWED_HOSTS\.has\(u\.hostname\)/);
+  assert.match(r, /redirect: "error"/); assert.ok(!/fetch\(/.test(w), "watch.mjs never fetches");
+  const hosts = [...r.matchAll(/host: "([^"]+)"/g)].map(m => m[1]).sort(); assert.deepEqual(hosts, ["api.frankfurter.dev", "data-api.ecb.europa.eu", "fred.stlouisfed.org", "publicreporting.cftc.gov"]);
 });
 test("package ships no artwork or artwork cache: explorer.js at the cache path is a data-free stub; no images in dist", () => {
   const stub = join(PKG, "dist", "ui", "cache", "tcg", "mtg", "explorer.js");

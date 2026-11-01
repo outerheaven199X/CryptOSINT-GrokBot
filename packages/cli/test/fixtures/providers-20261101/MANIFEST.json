@@ -1,0 +1,9 @@
+{
+ "recordedAt": "2026-11-01T11:34:48.119Z",
+ "note": "REAL provider responses recorded on 2026-11-01 from keyless public endpoints, trimmed to the columns the parsers read (ECB: KEY,CURRENCY,TIME_PERIOD,OBS_VALUE; FRED: last 260 rows). Test fixtures, not shipped in the npm package.",
+ "rights": {
+  "ecb": "Source: ECB statistics (free reuse with attribution)",
+  "fred": "public-domain US-government series (H.10, EIA)",
+  "cftc": "US-government public data"
+ }
+}
