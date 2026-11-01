@@ -148,9 +148,9 @@ with sync_playwright() as pw:
         dB = export_json(pg); (OUT / "case-B-fixture.json").write_text(json.dumps(dB, indent=2))
         res("B: exported case file is marked FIXTURE (snapshot.fixture true, observation kind fixture-test, data status fixture-replay)", dB["snapshot"]["fixture"] is True and dB["evidence"]["observed"] == "fixture-test" and dB["evidence"]["dataStatus"] == "fixture-replay", (dB.get("snapshot"), dB.get("evidence")))
         # 0.3.1 fix 2: at 1280x720 the footer is compact and the full not-financial-advice notice is present
-        pg.set_viewport_size({"width": 1280, "height": 720}); pg.wait_for_timeout(400)
+        pg.set_viewport_size({"width": 1280, "height": 720}); pg.evaluate("GTB.go('pulse')"); pg.wait_for_timeout(500)   # Pulse: one-line header
         fg = pg.evaluate("(()=>{const f=document.querySelector('footer').getBoundingClientRect(),p=document.getElementById('panel').getBoundingClientRect();return {f:Math.round(f.height),p:Math.round(p.height),t:document.querySelector('footer').innerText}})()")
-        res("B 0.3.1: at 1280x720 the footer is <=130px, the panel >=320px, and the full disclaimer is present", fg["f"] <= 130 and fg["p"] >= 320 and "NOT FINANCIAL ADVICE" in fg["t"].upper() and "Do your own research and consult a licensed professional." in fg["t"], fg)
+        res("B 0.3.1: at 1280x720 (Pulse) the footer is <=130px, the panel >=320px, and the full disclaimer is present", fg["f"] <= 130 and fg["p"] >= 320 and "NOT FINANCIAL ADVICE" in fg["t"].upper() and "Do your own research and consult a licensed professional." in fg["t"], fg)
         ctx.close()
     finally: stop(p)
     b.close()
