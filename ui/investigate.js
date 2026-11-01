@@ -475,12 +475,18 @@ function readingsCard() {
     return `<div class="erow" data-pkey="${esc(o.key)}" data-prov="${pv}" data-state="${st}">${sevSq(o.severity)}<span class="eb"><span class="hd"><span>${esc(catName(o.cat))} // ${esc(o.name)}</span><span>${esc(st === "below-threshold" ? "below threshold" : st)}</span></span><span class="ti">${esc(o.title)}</span><span class="hd"><span>${esc(PROV_LBL[pv])} · source as of ${esc(o.sourceAsOf || "unknown")}</span><span>fetched ${esc(age(o.ingestedAt))}</span></span></span><span class="ea"><button class="btn" data-inv="${esc(o.key)}">Investigate</button></span></div>`; };
   return `<div class="card" id="pulseReadings"><h2 class="disp">Refreshed readings</h2><div class="lim">${xs.length} checks from the last refresh, closest to threshold first. Below threshold is a measurement, not an all-clear.</div><div class="list">${xs.slice(0, 6).map(row).join("")}</div></div>`;
 }
+// After a refresh: rows from the refresh first, then the bundled snapshot rows in their own labelled group (nothing is dropped).
+function realLim(vis) {
+  const R = EV.refreshed, n = vis.filter(x => FROM_REFRESH.has(provOf(x))).length, when = esc(age(R.at)) + (R.fixture ? " (FIXTURE replay, test data)" : "");
+  return n ? "By severity, then time: the refresh of " + when + " first, then the bundled snapshot (cached, not refreshed)."
+    : "By severity, then time. Nothing from the refresh of " + when + " is past threshold; below: bundled snapshot (cached).";
+}
 function realGroups(vis, empty) {
   const R = EV.refreshed, fr = vis.filter(x => FROM_REFRESH.has(provOf(x))), bn = vis.filter(x => !FROM_REFRESH.has(provOf(x)));
   if (!fr.length && !bn.length) return empty;
-  const lbl = (t) => `<div class="pgrp lab up">${t}</div>`;
-  return `<div data-group="refresh">${lbl(fr.length + " from the last refresh" + (R.fixture ? " · FIXTURE replay (test data)" : "") + " · " + esc(iso(R.at)))}${fr.map(pRow).join("") || `<div class="empty">Nothing from the last refresh crossed a detector threshold in this filter. The refreshed checks are listed under Refreshed readings.</div>`}</div>`
-    + (bn.length ? `<div data-group="bundled">${lbl(bn.length + " from the bundled snapshot · cached, not refreshed · ingested " + esc(iso(EV.bundledGeneratedAt || EV.live.generatedAt)))}${bn.map(pRow).join("")}</div>` : "");
+  const lbl = (t, x) => `<div class="pgrp lab up">${t}${x ? `<span class="pgx"> · ${x}</span>` : ""}</div>`;
+  return `<div data-group="refresh" data-n="${fr.length}">${fr.length ? lbl("From the refresh" + (R.fixture ? " · FIXTURE replay (test data)" : ""), fr.length + " · " + esc(iso(R.at))) + fr.map(pRow).join("") : ""}</div>`
+    + (bn.length ? `<div data-group="bundled" data-n="${bn.length}">${lbl("Bundled snapshot · cached, not refreshed", bn.length + " · ingested " + esc(iso(EV.bundledGeneratedAt || EV.live.generatedAt)))}${bn.map(pRow).join("")}</div>` : "");
 }
 function vPulse(P) {
   const all = pulseItems(), real = all.filter(x => x.mode === "cached"), exp = all.filter(x => x.mode === "experimental"), demo = all.filter(x => x.mode === "examples");
@@ -497,7 +503,7 @@ function vPulse(P) {
   // Phones: the filters live behind one "Filters" control (collapsed by default) so the first observation is on the first screen.
   const openF = !phone() || IV.pfOpen;
   P.innerHTML = `<details class="card pfd" id="pFilt"${openF ? " open" : ""}><summary id="pFiltS">Filters${nAct ? " · " + nAct + " active" : ""}</summary><div class="frow">${chips("Category filter", "cat", cats, v => v === "all" ? "All markets" : catName(v))}${chips("Freshness filter", "fresh", FRESH.map(x => x[0]), v => FRESH.find(x => x[0] === v)[1])}</div><div class="frow" style="margin-top:8px">${chips("Severity filter", "sev", sevs, v => v === "all" ? "Any severity" : v)}<button class="chip" id="pDemo" aria-pressed="${IV.demo}">Demo (synthetic examples)</button></div></details>
-  <div class="grid2"><div class="card"><h2 class="disp">Real observations</h2><div class="lim">Ranked by severity, then time. Only observations that passed the existing detector rules. ${R ? "Refresh of " + esc(age(R.at)) + (R.fixture ? " (FIXTURE replay, test data)" : "") + " first, then the bundled snapshot; each row shows its own source date." : "Cached, not live: bundled snapshot " + esc(age(EV.live.generatedAt)) + "."}</div><div class="list" id="pulseReal">${R ? realGroups(vis, empty) : vis.map(pRow).join("") || empty}</div></div>
+  <div class="grid2"><div class="card"><h2 class="disp">Real observations</h2><div class="lim">${R ? realLim(vis) : "Ranked by severity, then time. Only observations that passed the existing detector rules. Cached, not live: bundled snapshot " + esc(age(EV.live.generatedAt)) + "."}</div><div class="list" id="pulseReal">${R ? realGroups(vis, empty) : vis.map(pRow).join("") || empty}</div></div>
   <div style="display:flex;flex-direction:column;gap:12px">${refreshCard("pulse")}${readingsCard()}<div class="card limited" id="pulseUnknown"><h2 class="disp">Unknown, not quiet</h2>${unk.map(c => `<div class="lim">${esc(c.src)}: ${esc(c.outcome)}${c.err ? " (" + esc(c.err) + ")" : ""}</div>`).join("") || `<div class="lim">Every source answered in the last refresh.</div>`}</div>
   <div class="card" id="pulseExp"><h2 class="disp">Experimental</h2><div class="lim">Undocumented or unverified sources, derived numbers only. Kept out of the ranked list.</div>${visE.map(pRow).join("") || `<div class="empty">None in this filter.</div>`}</div>
   ${IV.demo ? `<div class="card synbox" id="pulseDemo"><h2 class="disp">Demo: synthetic examples</h2><div class="lim">Invented instruments and prices that exercise the detectors. Not market activity.</div>${visD.map(pRow).join("") || `<div class="empty">None in this filter.</div>`}</div>` : ""}</div></div>`;
