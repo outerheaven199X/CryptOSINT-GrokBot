@@ -6,7 +6,28 @@ Unusual-activity analysis across selected public markets, with the evidence behi
 
 > **Experimental, user-run market-forensics research tool; rule-based observations with linked evidence and explicit coverage limits. No measured predictive accuracy.**
 
-> **Research preview.** The example data is synthetic, there is no live feed, and it has not been tested on physical devices. Hosted alerts are **NO GO**. The evaluation is **unlabeled** (the human-review gate is blocked), so **no detection accuracy has been measured or is claimed.** Not financial advice. See the [Legal notice](#legal-notice).
+> **Research preview.** Bundled data is a cached snapshot plus labelled synthetic examples. Fresh data arrives only when you press **Refresh** (keyless public providers for FX, energy and CFTC positioning); there is no background feed, and it has not been tested on physical devices. Hosted alerts are **NO GO**. The evaluation is **unlabeled** (the human-review gate is blocked), so **no detection accuracy has been measured or is claimed.** Not financial advice. See the [Legal notice](#legal-notice).
+
+## Quick start (npm, no clone)
+```bash
+npx grok-the-block              # Node >= 22.14.0; opens http://127.0.0.1:<port>/ in your browser
+npx grok-the-block --no-open    # print the URL only
+```
+1. **Pulse** lists real observations from the bundled snapshot.
+2. Press **Refresh** to fetch today's public data from keyless providers. Nothing is fetched until you press it.
+3. **Investigate** any observation for an evidence-only case file, then export it as HTML or JSON. Each file carries a content checksum, so the same evidence gives the same file.
+4. **Watch** it. The next Refresh tells you what changed, when, which source it came from and which checks are still unknown.
+
+The launcher serves only `127.0.0.1`. It has no runtime dependencies, install hooks, wallet, sign-in, telemetry or background daemon. Ctrl+C stops it. Details are in [packages/cli/README.md](packages/cli/README.md).
+
+### Bundled, optional and limited
+| | What you get |
+|---|---|
+| **Bundled (works offline)** | The v6 UI, a cached snapshot of real public data (FX, energy, CFTC, metals ETF proxies, Magic and CS2 prices) with its own as-of dates, labelled synthetic examples, Investigations with offline case files, Pulse and a local watchlist |
+| **Refresh (user-started, keyless)** | FX: the ECB reference rates (with the Frankfurter mirror if the ECB host fails) and the Fed H.10 USD/EUR fix from FRED. Energy: WTI, Brent and Henry Hub spot from FRED. Futures positioning: CFTC Commitments of Traders. The same detectors and thresholds as the Python skills run in the launcher |
+| **Stays on the snapshot** | Metals ETF proxies, Magic and CS2 prices and the wider markets family. Their keyless sources need the Python skills from a clone (`tools/build_everything.py --fetch`), or they are undocumented endpoints we don't call from the package |
+| **Optional Connected Grok** | Bring your own `XAI_API_KEY`. Every question shows the exact evidence packet first and asks for consent, and xAI bills your account. **The live xAI path is UNVERIFIED**: it is tested only against a local mock |
+| **Provider limits** | The ECB and FRED publish on business days and FRED's energy series lag by about a week. CFTC is weekly (Tuesday positions, published Friday). An upstream date older than its cadence is shown as **upstream-stale**, never fresh. A failed provider keeps its last good reading, marked **stale** with the error. It never becomes quiet. Provider display rights are unverified (see [docs/PROVIDER-RIGHTS.md](docs/PROVIDER-RIGHTS.md)) |
 
 ## What it is
 Grok The Block is the everything app for unusual market activity. Together with Grok Bot, it flags unusual activity across prediction markets, US stocks and options, Treasuries, macro and calendar events, and crypto, and it shows the evidence behind every flag. It never tells you to buy, sell or hold.
@@ -69,7 +90,10 @@ The full directory of 53 asset classes is in **All Markets** inside the app.
 | View | Shows |
 |---|---|
 | Home | Search box, "Try" examples, and Grok Bot |
-| Universe | Every asset class (53 so far) as a tile grid with category and status filters. Each tile opens venues, the usual arbitrage pattern, the best data source and its licence status, plus the live evidence for that class |
+| Pulse | Real observations from the current snapshot, with Refresh (launcher only), filters, provenance labels (refreshed, cached, carried after a failure, fixture) and investigation shortcuts |
+| Investigate | An evidence-only case file for one observation. The detector's own state (flagged, below threshold, unknown or stale) is fixed and Grok can't override it. Export it as HTML or JSON, or use optional Connected Grok |
+| Watchlist | Watched observations, what changed at the last Refresh, which source and when, which checks are still unknown, and evidence-only notices |
+| Universe | Every asset class (53 so far) as a tile grid with category and status filters. Each tile opens venues, the typical observed spread, the best data source and its licence status, plus the live evidence for that class |
 | Anomalies | One feed across every market. Live cached data and synthetic examples sit in separate columns, with "closest to threshold" and "unknown, not quiet" lists. Evidence opens on the result stage |
 | Token | Kinetic result sequence: hazard wipe, RESULT, five stats counting up, then the verdict roll. Details tabs: Holders, Timeline, Why flagged |
 | Wallet | The same result sequence for a wallet. Rows are the tokens it touched |
@@ -87,7 +111,7 @@ The full directory of 53 asset classes is in **All Markets** inside the app.
 - **Live feed and ticker:** these replay items from the loaded reports.
 - **Open / Export:** Open loads report JSON files from your device. Export saves the current report as JSON.
 
-## Quick start
+## Quick start from a clone
 ```bash
 git clone https://github.com/outerheaven199X/groktheblock && cd groktheblock
 python3 -m http.server 8000        # Windows: py -m http.server 8000
@@ -136,30 +160,31 @@ examples/*.json (synthetic) ──tools/build_ui_data.py──▶ ui/data/report
   - `watch-token`, `threat-feed`
   - `promo-provenance`, `signals`, `solana-data`
 - Each report carries an `assessment`: lead finding, severity, coverage and limits, findings tagged *observed*, *heuristic* or *inferred*, and next actions. If a provider is down, its values show as unknown, never as clean.
-- **The UI is fully local and makes zero network requests:**
+- **The UI makes no outbound network requests:**
   - **Local assets only:** it loads only its own files (HTML, JS, fonts, data).
-  - **No outbound calls:** there is no fetch, XHR or websocket, and the CSP sets `connect-src 'none'`.
+  - **Same-origin only:** the CSP sets `connect-src 'self'`. Served statically (`python3 -m http.server`), the page never calls anything. Under `npx grok-the-block` it calls only the launcher's local `/api/` (loopback Host, same-origin Origin, a per-run token and a custom request header).
+  - **Refresh runs in the launcher, not the page:** it uses HTTPS GETs to four allow-listed hosts (data-api.ecb.europa.eu, api.frankfurter.dev, fred.stlouisfed.org, publicreporting.cftc.gov) with no redirects and bounded retries, and only when you press Refresh.
   - **Vendored libraries:** three.js r164 and its post-processing passes are vendored in `ui/vendor/`.
   - **Self-hosted fonts:** the fonts are in `ui/fonts/`.
   - **Verified:** a Playwright test checks every request.
 - **Plain JavaScript, no build step:** `index.html`, `app.js` and `stage.js`.
 - **The skills do use the network:** they call public APIs when you run them. The UI never does.
-- **Grok Bot integration** is copy-and-paste only: there is no chat panel, no API key and no deep link.
+- **Grok integration:** "Ask about this" and "Copy to Grok" copy a bounded prompt. Optional Connected Grok (launcher only, your own `XAI_API_KEY`, consent per question) is **UNVERIFIED** against the live xAI API. Grok can interpret evidence, but it can't change a detector's state: an answer that contradicts it is rejected (fail closed).
 
 ## Roadmap
-- **Live data in the UI.** Today the UI shows saved reports; live polling runs only in `signals.py watch`.
+- **More refreshable markets.** Refresh covers FX, energy and CFTC positioning. Metals, collectibles and the markets family stay on the snapshot. Live polling runs only in `signals.py watch`.
 - **Hosted alerts.** No hosted service exists yet.
 - **Measured accuracy.** The human-labelled evaluation has not started, so no accuracy is claimed.
 - **Dedicated market views.** Non-crypto markets share the Signals view; Token, Wallet and Replay views are Solana-only.
-- **More markets.** Futures, FX and non-US equities are not covered.
+- **More markets.** Non-US equities are not covered.
 - **Physical-device testing** on iOS and Android.
 
 ## Project status and limitations
 - **Research preview.** Local use: CONDITIONAL GO. Hosted or public alerts: **NO GO**. Provider rights, licensed latency, monitored delivery, and load and device testing are all outstanding.
 - **Evaluation is unlabeled.** The Treasury evaluation roster and sample exist, but there are **0 human labels**. The reviewer gate needs two independent reviewers, an adjudicator, 12 vignettes each and a 25-item pilot, none of which has happened yet. **No precision, recall, hit rate or lead time has been measured.** Signal rankings are uncalibrated sorting aids. See [docs/review/ROUND9-RESULTS.md](docs/review/ROUND9-RESULTS.md) and [docs/review/FINDINGS.md](docs/review/FINDINGS.md).
 - **Synthetic examples.** Everything bundled in `examples/` is invented (`$SYNTHING`, `$SYNBOT`, `$SYNFART`). It describes no real token or wallet.
-- **No live feed.** The UI's Live feed replays loaded reports. `signals.py watch` polls only when you run it. Its optional webhook delivery is at-least-once, deduplicated by `alertId` (not exactly-once). There is no hosted service.
-- **Devices.** Tested only in Chromium emulation (desktop, 390 px, reduced motion). It has not been tested on physical iOS or Android devices. CI is staged but inactive.
+- **No live feed.** Refresh is a single run that you start; nothing is scheduled. The UI's Live feed replays loaded reports. `signals.py watch` polls only when you run it. Its optional webhook delivery is at-least-once, deduplicated by `alertId` (not exactly-once). There is no hosted service.
+- **Devices.** The UI is tested only in Chromium emulation (desktop, 320–390 px, reduced motion). It has not been tested on physical iOS or Android devices. CI is staged but inactive.
 - **Data limits:**
   - Without a Helius key, busy tokens may not reach launch (`reachedLaunch: false`).
   - PnL is realized SOL flow in the analyzed window.

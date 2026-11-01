@@ -8,6 +8,7 @@ const R = join(dirname(fileURLToPath(import.meta.url)), "..", "..");
 const arg = (k, d) => { const i = process.argv.indexOf(k); return i > 0 ? process.argv[i + 1] : d; };
 const m = startMockXai(); const mp = await m.ready;
 const env = { GTB_XAI_BASE_URL: `http://127.0.0.1:${mp}/v1` };
+if (arg("--fixtures", "")) env.GTB_REFRESH_FIXTURES = arg("--fixtures", "");   // recorded provider responses; never the network
 if (arg("--key", "1") === "1") env.XAI_API_KEY = arg("--fake-key", "xai-TESTONLY-fake-key-0123456789abcdef");
 const logs = [];
 const app = start({ root: join(R, "ui"), port: +arg("--port", "0"), open: false, log: (s) => { logs.push(String(s)); process.stderr.write(String(s) + "\n"); }, env, stateDir: arg("--state", null) });

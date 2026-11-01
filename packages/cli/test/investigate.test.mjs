@@ -67,7 +67,7 @@ test("session: status says live path unverified, key is never echoed; disconnect
   const B = await boot();
   try {
     assert.equal(B.ses.s, 200); assert.equal(B.ses.j.grok.available, true); assert.equal(B.ses.j.grok.liveVerified, false); assert.equal(B.ses.j.grok.mock, true);
-    assert.equal(B.ses.j.refresh.mode, "snapshot-only"); assert.ok(!B.ses.b.includes(FAKE_KEY));
+    assert.equal(B.ses.j.refresh.mode, "user-started"); assert.ok(!B.ses.b.includes(FAKE_KEY));
   } finally { await B.stop(); }
   const N = await boot({ key: null });
   try {
@@ -85,7 +85,7 @@ test("mock xAI success: function call round trip, citations, usage, request shap
   try {
     const r = await B.inv({ question: "What happened?" });
     assert.equal(r.s, 200, r.b); assert.equal(r.j.status, "answered"); assert.equal(r.j.mock, true); assert.equal(r.j.liveVerified, false);
-    assert.equal(r.j.sections.observed.length, 1); assert.deepEqual(r.j.sections.observed[0].evidenceIds, ["fx:EURAUD:CHECKS"]);
+    assert.ok(r.j.sections.observed.length >= 1 && r.j.sections.observed.every(o => o.source === "detector"), "Observed is rebuilt from the detector"); assert.deepEqual(r.j.sections.observed[0].evidenceIds, ["fx:EURAUD:CHECKS"]);
     assert.equal(r.j.sections.context[0].status, "cited"); assert.deepEqual(r.j.sections.context[0].citations, [MOCK_CITES[0]]);
     assert.ok(r.j.citations.includes(MOCK_CITES[0]));
     assert.equal(r.j.usage.requests, 2); assert.equal(r.j.usage.input_tokens, 2300); assert.equal(r.j.usage.output_tokens, 360); assert.equal(r.j.usage.reasoning_tokens, 102); assert.equal(r.j.usage.reported, true); assert.equal(r.j.usage.functionCalls, 1);
@@ -164,7 +164,7 @@ test("mock xAI: prompt injection, invented numbers/ids, advice, secrets and comm
     const r = await B.inv({ question: "mock:injection" }); assert.equal(r.j.status, "answered");
     const why = r.j.rejected.map(x => x.reason).join(" | ");
     for (const re of [/guarantee|buy\/sell/, /numbers that are not in the evidence/, /not in the packet/, /secrets|execute/, /wrongdoing/, /arbitrage|profit/]) assert.match(why, re);
-    assert.equal(r.j.sections.observed.length, 1, "only the grounded observed claim survives");
+    assert.ok(r.j.sections.observed.every(o => o.source === "detector"), "no model-authored observed text survives"); assert.ok(!/87\.3|Wallet cluster|strong buy/i.test(JSON.stringify(r.j.sections)));
     const all = JSON.stringify(r.j.sections); assert.ok(!/strong buy|XAI_API_KEY|curl|insider|arbitrage/i.test(all), all);
   } finally { await B.stop(); }
 });
@@ -189,7 +189,7 @@ test("unit: redaction, safe base URL hook, function sandbox, answer schema", () 
   assert.equal(baseUrlFrom({ GTB_XAI_BASE_URL: "http://10.0.0.1:80/v1" }).url, XAI_BASE); assert.equal(baseUrlFrom({ GTB_XAI_BASE_URL: "http://127.0.0.1:9999/v1" }).mock, true);
   assert.match(runFunction(PACKET(), "get_observation", "{bad").error, /JSON/); assert.ok(runFunction(PACKET(), "get_coverage", JSON.stringify({ id: "fx:EURAUD" })).coverage);
   assert.equal(validateAnswer("not json", PACKET(), []).ok, false);
-  assert.equal(validateAnswer(JSON.stringify({ observed: [{ text: "ratio 0.42", evidenceIds: ["fx:EURAUD:CHECKS"] }] }), PACKET(), []).sections.observed.length, 1, "packet numbers allowed");
+  assert.equal(validateAnswer(JSON.stringify({ observed: [{ text: "ratio 0.42", evidenceIds: ["fx:EURAUD:CHECKS"] }] }), PACKET(), []).rejected.length, 0, "packet numbers allowed");
 });
 
 test("watchlist: lazy creation, 0700/0600, persists across restart, synthetic refused, settings, clear removes the data", async () => {

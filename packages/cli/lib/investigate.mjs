@@ -1,5 +1,6 @@
 // Grok The Block // Investigations: the small local API behind the launcher. Node built-ins only.
-// Surface (all POST, JSON): /api/session, /api/grok/key, /api/grok/forget, /api/investigate, /api/investigate/cancel, /api/watchlist (POST).
+// Surface (all POST, JSON): /api/session, /api/grok/key, /api/grok/forget, /api/investigate, /api/investigate/cancel, /api/watchlist,
+// /api/refresh (user-started keyless refresh; see refresh.mjs). Plus GET /data/refreshed.js (the last refreshed snapshot, data only).
 // Guards: loopback Host only, same-origin Origin (required on every API call), custom X-GTB-Request header (forces a CORS
 // preflight cross-site, and OPTIONS is refused), per-run unpredictable session token, JSON content type, strict body sizes and
 // timeouts, no CORS headers. The xAI key lives only in this process (inherited XAI_API_KEY or a session-only entry); it is
@@ -10,6 +11,8 @@ import { randomBytes, createHash, timingSafeEqual } from "node:crypto";
 import { mkdirSync, writeFileSync, readFileSync, renameSync, rmSync, existsSync, chmodSync, statSync, readdirSync, rmdirSync } from "node:fs";
 import { join, isAbsolute, resolve, sep } from "node:path";
 import { homedir } from "node:os";
+import { runRefresh, SnapshotStore, readBundled, refreshedScript, PROVIDERS, REFRESHABLE, fixtureFetch } from "./refresh.mjs";
+import { readingFor, applyRefreshToWatch } from "./watch.mjs";
 
 export const XAI_BASE = "https://api.x.ai/v1";
 export const DEFAULT_MODEL = "grok-4.7";
@@ -99,7 +102,54 @@ export const SYSTEM_PROMPT = [
   "No buy/sell recommendations, no 'arbitrage' (cross-venue gaps are observed spreads), no wrongdoing attribution.",
   "Reply with ONE JSON object and nothing else: {\"observed\":[{\"text\":...,\"evidenceIds\":[ids from the packet]}],\"context\":[{\"text\":...,\"citations\":[https urls returned by your search tools]}],\"interpretation\":[{\"text\": qualified hypothesis}],\"disprove\":[{\"text\":...}],\"limits\":[{\"text\":...}]}.",
   "If external context is absent, stale or contradictory, say so in context with no citations. If a claim is unsupported, say it is unsupported instead of citing.",
+  "Detector state is fixed: each observation is flagged, below threshold, or unknown, and may be stale, exactly as the packet says. Never claim a check fired, exceeded a threshold or has a different severity than the packet, and never call stale data fresh or live. The app rebuilds the Observed section from the detector itself and rejects any answer that contradicts it.",
 ].join("\n");
+
+/* ---------------- detector state (deterministic; the model can never override it) ---------------- */
+// Every observation in the approved packet resolves to exactly one detector state, derived ONLY from detector output fields
+// (detectorState / severity / flagged / trigger), plus an orthogonal stale flag from data quality and coverage. Inconsistent
+// fields fail closed to "unknown". The Observed section of a connected answer is built from these states, never from model text.
+export const SEVERITIES = ["INFO", "LOW", "MEDIUM", "HIGH", "CRITICAL"];
+export const STATES = ["flagged", "below-threshold", "unknown"];
+const STATE_TXT = { flagged: "flagged by the detector", "below-threshold": "measured, below the detector threshold (not flagged)", unknown: "unknown: the detector could not assess it (unknown, not quiet)" };
+function covFor(packet, mod) { return (packet.coverage || []).find(c => c && c.module === mod) || null; }
+export function detectorState(o, packet = {}) {
+  const sev = String((o && o.severity) || "UNKNOWN").toUpperCase();
+  const num = (v) => typeof v === "number" ? v : typeof v === "string" && /^-?\d+(\.\d+)?$/.test(v.trim()) ? Number(v) : null;
+  const mt = o && o.metrics && typeof o.metrics === "object" ? o.metrics : {};
+  const tr = o && o.trigger && typeof o.trigger === "object" ? o.trigger : num(mt.ratio) != null && num(mt.threshold) != null ? { observed: num(mt.ratio), threshold: num(mt.threshold) } : null;
+  let st;
+  if (sev === "UNKNOWN" || !sev) st = "unknown";
+  else if (sev === "NONE") st = "below-threshold";
+  else if (SEVERITIES.includes(sev)) st = "flagged";
+  else st = "unknown";
+  if (st === "unknown" && sev !== "UNKNOWN" && o && o.flagged === false && !SEVERITIES.includes(sev)) st = "below-threshold";
+  if (st === "flagged" && o && o.flagged === false) st = "unknown";                       // contradictory detector fields: fail closed
+  if (st === "flagged" && tr && num(tr.observed) != null && num(tr.threshold) != null && num(tr.observed) < num(tr.threshold)) st = "unknown";
+  if (o && typeof o.detectorState === "string" && STATES.includes(o.detectorState) && o.detectorState !== st) st = "unknown";
+  const cov = covFor(packet, o && o.module) || {};
+  const dq = Array.isArray(o && o.dataQuality) ? o.dataQuality.join(" ") : "";
+  const stale = !!((o && o.stale === true) || /\bstale\b/i.test(dq) || /^(STALE|UNAVAILABLE)$/.test(String(cov.status || "")) || /stale|carried|bundled/.test(String(cov.freshness || "")));
+  return { id: o && (o.id || o.observationId), detector: String((o && o.detector) || "UNKNOWN"), module: o && o.module, severity: sev, state: st, stale, trigger: tr, asOf: (o && o.asOf) || null, title: (o && o.title) || "" };
+}
+export function packetStates(packet) {
+  const m = new Map();
+  (packet.observations || []).forEach(o => m.set(o.id, { ...detectorState(o, packet), role: "observation" }));
+  (packet.related || []).forEach(r => { if (!m.has(r.observationId)) m.set(r.observationId, { ...detectorState({ ...r, id: r.observationId }, packet), role: "related" }); });
+  return m;
+}
+// The Observed section: built from detector output only. Same function for Grok answers and for the local summary.
+export function observedFromPacket(packet) {
+  const S = packetStates(packet), name = clip((packet.instrument && (packet.instrument.name || packet.instrument.stableId)) || "instrument", 120), out = [];
+  for (const o of packet.observations || []) {
+    const s = S.get(o.id), tr = s.trigger || {};
+    const reading = tr.observed != null ? ". Reading " + tr.observed + " vs threshold " + tr.threshold + (tr.unit ? " " + tr.unit : "") + (tr.window ? " over " + tr.window : "") : "";
+    out.push({ text: clip(s.detector + " on " + name + ": " + STATE_TXT[s.state] + (s.state === "flagged" ? " (severity " + s.severity + ")" : "") + reading + "." + (o.asOf ? " Source as of " + o.asOf + "." : "") + (s.stale ? " Stale: not a fresh reading." : ""), 600), evidenceIds: [o.id], detectorState: s.state, stale: s.stale, severity: s.severity, source: "detector" });
+    if (o.title) out.push({ text: clip("Detector output: " + o.title, 400), evidenceIds: [o.id], detectorState: s.state, stale: s.stale, severity: s.severity, source: "detector" });
+  }
+  for (const r of packet.related || []) { const s = S.get(r.observationId); out.push({ text: clip("Related (" + r.relation + ", " + r.confidence + "): " + s.detector + " " + STATE_TXT[s.state] + (s.state === "flagged" ? " (severity " + s.severity + ")" : "") + (r.title ? ": " + r.title : ""), 500), evidenceIds: [r.observationId], detectorState: s.state, stale: s.stale, severity: s.severity, source: "detector" }); }
+  return out;
+}
 
 /* ---------------- answer validation ---------------- */
 const BANNED = [
@@ -118,26 +168,83 @@ function extractJson(text) {
   const a = t.indexOf("{"), b = t.lastIndexOf("}"); if (a < 0 || b <= a) return null;
   try { const j = JSON.parse(t.slice(a, b + 1)); return j && typeof j === "object" && !Array.isArray(j) ? j : null; } catch { return null; }
 }
-// Returns {sections, rejected, notes}. Every item is kept, rejected (with a reason) or downgraded ("uncited"); nothing is rewritten.
+// Claim patterns. A match preceded (in the same clause) by a negation is a negated claim; by if/would/could/whether a hypothesis.
+const FLAG_RE = /\b(?:flag(?:s|ged|ging)?|fir(?:ed|es|ing)|trigger(?:ed|s|ing)|tripp?ed|exceed(?:ed|s|ing)?|breach(?:ed|es|ing)?|crossed|surpass(?:ed|es)?|anomal(?:y|ies|ous)|alert(?:ed|s)?|outliers?|spik(?:e|ed|es)|(?:far |well |way )?(?:above|over|past|beyond) (?:the |its |a |his |their )?(?:[\w.-]+ ){0,2}(?:threshold|normal|usual|typical|realised vol\w*|realized vol\w*))\b/gi;
+const QUIET_RE = /\b(?:(?:below|under|within|inside|short of|beneath) (?:the |its |a )?(?:[\w.-]+ ){0,2}(?:threshold|normal range|limit|realised vol\w*|realized vol\w*)|quiet|all[- ]clear|nothing unusual|normal reading|unremarkable)\b/gi;
+const NOFLAG_RE = /\b(?:not (?:been )?flagged|no (?:flag|anomal\w*|alert|signal)|did(?:n't| not) (?:flag|fire|trigger|exceed|breach)|does(?:n't| not) (?:flag|fire|trigger|exceed|breach)|was(?:n't| not) (?:flagged|triggered)|never (?:flagged|fired|triggered))\b/gi;
+const NEG_TAIL = /\b(?:not|no|never|without|nor|neither|cannot|isn'?t|wasn'?t|didn'?t|doesn'?t|don'?t|can'?t|won'?t|hasn'?t|haven'?t|unknown whether)\b[^.;:!?]{0,40}$/i;
+const HYPO_TAIL = /\b(?:if|would|could|might|whether|unless|should it|were it|in case)\b[^.;:!?]{0,50}$/i;
+const SEV_CLAIMS = [/\bseverity(?:\s+(?:is|was|of|level|rating|at))?\s*[:=]?\s*["'(]?(none|info|low|medium|high|critical|unknown)\b/gi, /\b(info|low|medium|high|critical)[- ]severity\b/gi, /\b(NONE|INFO|LOW|MEDIUM|HIGH|CRITICAL)\b/g, /\brated (none|info|low|medium|high|critical)\b/gi];
+const FRESH_RE = /\b(?:real[- ]?time|live (?:data|price|prices|feed|quotes?|reading|market data)|up[- ]to[- ]the[- ]minute|up[- ]to[- ]date|fresh(?:ly)? (?:data|reading|observation|snapshot)|as of (?:today|now)|right now|current(?:ly)? (?:live|trading))\b/gi;
+function assertive(txt, re) {
+  const out = [];
+  for (const m of txt.matchAll(re)) { const before = txt.slice(Math.max(0, m.index - 60), m.index); const clause = before.split(/[.;:!?]/).pop(); const after = txt.slice(m.index + m[0].length, m.index + m[0].length + 60).split(/[.;:!?]/)[0];
+    out.push({ word: m[0], negated: NEG_TAIL.test(clause), hypo: HYPO_TAIL.test(clause) || /\b(?:would|could|might)\b/i.test(after) }); }
+  return out;
+}
+function detectorAliases(states) {
+  const out = [];
+  for (const s of states.values()) { const d = s.detector; if (!d || d === "UNKNOWN") continue; out.push([d.toLowerCase(), s.detector]); const sp = d.toLowerCase().replace(/_/g, " "); if (sp.length > 6) out.push([sp, s.detector]); }
+  return out;
+}
+// Returns null when the claim agrees with the detector, else {reason, category:"state"} (fail-closed categories).
+export function checkClaim(text, section, citedStates, packetStatesMap) {
+  const t = String(text || ""), lc = t.toLowerCase();
+  const targets = citedStates.length ? citedStates : [...packetStatesMap.values()].filter(s => s.role === "observation").slice(0, 1);
+  if (!targets.length) return null;
+  const desc = (s) => s.id + " is " + s.state + " (severity " + s.severity + (s.trigger && s.trigger.observed != null ? ", " + s.trigger.observed + (Number(s.trigger.observed) < Number(s.trigger.threshold) ? " < " : " vs ") + s.trigger.threshold : "") + ")";
+  const flags = assertive(t, FLAG_RE).filter(x => !x.negated && !x.hypo);
+  const noflag = assertive(t, NOFLAG_RE).filter(x => !x.hypo);
+  const quiet = assertive(t, QUIET_RE).filter(x => !x.negated && !x.hypo);
+  for (const s of targets) {
+    if (flags.length && s.state !== "flagged") return { category: "state", reason: "contradicts the detector: claims '" + flags[0].word + "' but " + desc(s) };
+    if ((noflag.length || quiet.length) && s.state === "flagged") return { category: "state", reason: "contradicts the detector: claims '" + (noflag[0] || quiet[0]).word + "' but " + desc(s) };
+    if ((noflag.length || quiet.length) && s.state === "unknown") return { category: "state", reason: "contradicts the detector: claims '" + (noflag[0] || quiet[0]).word + "' but " + s.id + " is unknown (unknown, not quiet)" };
+  }
+  const sevs = new Set(targets.map(s => s.severity));
+  for (const re of SEV_CLAIMS) { for (const m of t.matchAll(re)) { const before = t.slice(Math.max(0, m.index - 40), m.index).split(/[.;:!?]/).pop(); if (NEG_TAIL.test(before) || HYPO_TAIL.test(before)) continue; const c = m[1].toUpperCase(); if (!sevs.has(c) && !(c === "NONE" && targets.every(s => s.state === "below-threshold"))) return { category: "state", reason: "fabricated severity: claims " + c + " but the packet says " + [...sevs].join("/") }; } }
+  const fresh = assertive(t, FRESH_RE).filter(x => !x.negated && !x.hypo);
+  if (fresh.length && /real[- ]?time|live /i.test(fresh[0].word)) return { category: "state", reason: "claims '" + fresh[0].word + "' data; observations are snapshots from a user-started refresh, never live" };
+  if (fresh.length && targets.some(s => s.stale)) return { category: "state", reason: "claims '" + fresh[0].word + "' but the cited observation is stale" };
+  if (citedStates.length) {
+    for (const [alias, det] of detectorAliases(packetStatesMap)) if (lc.includes(alias) && !citedStates.some(s => s.detector === det)) return { category: "state", reason: "misattributed evidence: names the " + det + " detector but cites " + citedStates.map(s => s.id + " (" + s.detector + ")").slice(0, 3).join(", ") };
+  }
+  return null;
+}
+const STATE_KEYS = ["severity", "flagged", "detectorState", "state", "verdict", "triggered", "status"];
+// Returns {ok, sections, rejected, notes}. Observed is ALWAYS observedFromPacket(packet). Model items are kept, rejected (with a
+// reason) or downgraded ("uncited"); nothing is rewritten. Any contradiction of detector state rejects the whole answer (fail closed).
 export function validateAnswer(text, packet, returnedCitations) {
   const j = extractJson(text);
-  if (!j) return { ok: false, reason: "answer was not the required JSON structure; it was not shown", sections: null, rejected: [], notes: [] };
+  const observed = (() => { try { return observedFromPacket(packet); } catch { return []; } })();
+  if (!j) return { ok: false, reason: "answer was not the required JSON structure; it was not shown", sections: null, rejected: [], notes: [], observed };
   const ids = packetIds(packet), pkt = JSON.stringify(packet), cited = new Set((returnedCitations || []).map(safeHttps).filter(Boolean));
+  const S = packetStates(packet);
   const pktNums = new Set(numbersIn(pkt).map(n => String(Number(n))));
-  const out = { observed: [], context: [], interpretation: [], disprove: [], limits: [] }, rejected = [], notes = [];
+  const out = { observed, context: [], interpretation: [], disprove: [], limits: [] }, rejected = [], notes = [];
+  let restated = 0, stateFail = null;
+  for (const k of STATE_KEYS) if (Object.prototype.hasOwnProperty.call(j, k)) { stateFail = stateFail || "the answer tried to set detector state ('" + k + "'); detector state comes only from the detector"; rejected.push({ section: "answer", text: clip(k + ": " + JSON.stringify(j[k]), 240), reason: "model may not set detector state", category: "state" }); }
   const items = (k) => (Array.isArray(j[k]) ? j[k] : j[k] ? [j[k]] : []).slice(0, 12).map(x => typeof x === "string" ? { text: x } : x).filter(x => x && typeof x.text === "string");
-  for (const k of Object.keys(out)) for (const it of items(k)) {
+  const reject = (k, txt, reason, category = "content") => { rejected.push({ section: k, text: clip(txt, 240), reason, category }); if (category === "state" && !stateFail) stateFail = reason; };
+  for (const k of ["observed", "context", "interpretation", "disprove", "limits"]) for (const it of items(k)) {
     const txt = clip(it.text, 1200);
-    const ban = BANNED.find(([re]) => re.test(txt)); if (ban) { rejected.push({ section: k, text: clip(txt, 240), reason: ban[1] }); continue; }
+    const ban = BANNED.find(([re]) => re.test(txt)); if (ban) { reject(k, txt, ban[1]); continue; }
     const evid = (Array.isArray(it.evidenceIds) ? it.evidenceIds : []).filter(x => typeof x === "string").slice(0, 10);
     const badIds = evid.filter(x => !ids.has(x));
-    if (badIds.length) { rejected.push({ section: k, text: clip(txt, 240), reason: "cites evidence ids that are not in the packet: " + badIds.slice(0, 3).map(x => clip(x, 60)).join(", ") }); continue; }
+    if (badIds.length) { reject(k, txt, "cites evidence ids that are not in the packet: " + badIds.slice(0, 3).map(x => clip(x, 60)).join(", ")); continue; }
+    const citedStates = evid.map(x => S.get(x)).filter(Boolean);
     if (k === "observed") {
-      if (!evid.length) { rejected.push({ section: k, text: clip(txt, 240), reason: "an observed fact must name the detector observation id it comes from" }); continue; }
-      const invented = numbersIn(txt).filter(n => !pktNums.has(String(Number(n))));
-      if (invented.length) { rejected.push({ section: k, text: clip(txt, 240), reason: "states numbers that are not in the evidence: " + invented.slice(0, 4).join(", ") }); continue; }
-      out.observed.push({ text: txt, evidenceIds: evid }); continue;
+      if (!evid.length) { reject(k, txt, "an observed fact must name the detector observation id it comes from"); continue; }
+      if (!citedStates.length) { reject(k, txt, "misattributed evidence: an observed fact must cite a detector observation, not only a source or coverage id", "state"); continue; }
     }
+    if (k === "observed" || k === "interpretation" || k === "context") {
+      const c = checkClaim(txt, k, citedStates, S); if (c) { reject(k, txt, c.reason, c.category); continue; }
+    }
+    if (k === "observed" || k === "interpretation" || (k === "context" && !(Array.isArray(it.citations) && it.citations.length))) {
+      const invented = numbersIn(txt).filter(n => !pktNums.has(String(Number(n))));
+      if (invented.length) { reject(k, txt, "states numbers that are not in the evidence: " + invented.slice(0, 4).join(", "), k === "observed" ? "content" : "content"); continue; }
+    }
+    if (k === "observed") { restated++; continue; }              // checked, consistent, but Observed is built from the detector
     if (k === "context") {
       const urls = (Array.isArray(it.citations) ? it.citations : []).slice(0, 8), okU = [], badU = [];
       urls.forEach(u => { const h = safeHttps(u); (h && cited.has(h) ? okU : badU).push(h || clip(String(u), 80)); });
@@ -146,8 +253,10 @@ export function validateAnswer(text, packet, returnedCitations) {
     }
     out[k].push({ text: txt, evidenceIds: evid.length ? evid : undefined });
   }
+  if (restated) notes.push(restated + " model restatement(s) of the evidence agreed with the detector and are not repeated; Observed is built from detector output only.");
   if (!out.context.length) out.context.push({ text: "No external context in this answer.", citations: [], status: "absent" });
-  return { ok: true, sections: out, rejected, notes };
+  if (stateFail) return { ok: false, reason: "answer rejected (fail closed): " + stateFail, sections: null, rejected, notes, observed };
+  return { ok: true, sections: out, rejected, notes, observed };
 }
 
 /* ---------------- xAI Responses client (streaming SSE) ---------------- */
@@ -255,7 +364,7 @@ export function stateDirProblem(dir, pkgRoot) {
   if (/[\\/]node_modules[\\/]/.test(d) || /[\\/]\.git[\\/]/.test(d)) return "state directory is inside node_modules or a Git checkout";
   return null;
 }
-const EMPTY = () => ({ schemaVersion: "gtb-watchlist/v1", items: [], settings: { notify: false, quietHours: null }, notified: [] });
+const EMPTY = () => ({ schemaVersion: "gtb-watchlist/v1", items: [], settings: { notify: false, quietHours: null }, notified: [], notices: [] });
 export class WatchStore {
   constructor(dir, pkgRoot) { this.dir = dir; this.problem = stateDirProblem(dir, pkgRoot); this.file = dir ? join(dir, "watchlist.json") : null; }
   read() {
@@ -278,7 +387,7 @@ export class WatchStore {
   }
 }
 const OBS = (o) => o && typeof o === "object" ? { evidenceId: clip(o.evidenceId, 200), asOf: clip(o.asOf, 40), ingestedAt: clip(o.ingestedAt, 40), severity: clip(o.severity, 16), kind: clip(o.kind, 24) } : null;
-export function watchOp(store, b) {
+export function watchOp(store, b, live = null) {
   const j = store.read(); const op = b && b.op;
   const find = (id) => j.items.find(x => x.stableId === id);
   const idOk = (v) => typeof v === "string" && ID_RE.test(v);
@@ -287,12 +396,13 @@ export function watchOp(store, b) {
   if (op === "add") {
     if (!idOk(b.stableId) || !idOk(b.category || "x")) return { error: "invalid stable id" };
     if (b.last && /synthetic/.test(String(b.last.kind))) return { error: "synthetic examples cannot be watched" };
-    if (!find(b.stableId)) { if (j.items.length >= LIMITS.watchItems) return { error: "watchlist is full" }; j.items.push({ stableId: b.stableId, category: clip(b.category, 40), label: b.label ? clip(b.label, 80) : "", muted: false, addedAt: new Date().toISOString(), last: OBS(b.last) }); }
+    if (!find(b.stableId)) { if (j.items.length >= LIMITS.watchItems) return { error: "watchlist is full" }; const rd = live ? readingFor(live, b.stableId) : null; j.items.push({ stableId: b.stableId, category: clip(b.category, 40), label: b.label ? clip(b.label, 80) : "", muted: false, addedAt: new Date().toISOString(), last: OBS(b.last), reading: rd && rd.found ? rd : null }); }
   } else if (op === "remove") { j.items = j.items.filter(x => x.stableId !== b.stableId); }
   else if (op === "mute" || op === "label") { const it = find(b.stableId); if (!it) return { error: "not on the watchlist" }; if (op === "mute") it.muted = !!b.muted; else it.label = clip(b.label || "", 80); }
   else if (op === "observe") { // record the user's last successful observation (after they reviewed the comparison)
     const it = find(b.stableId); if (!it) return { error: "not on the watchlist" }; if (b.last && /synthetic/.test(String(b.last.kind))) return { error: "synthetic data is never recorded" }; it.last = OBS(b.last); it.seenAt = new Date().toISOString();
-  } else if (op === "notified") { const k = clip(b.key, 300); if (!j.notified.includes(k)) j.notified = j.notified.concat([k]).slice(-500); }
+  } else if (op === "notices-seen") { (j.notices || []).forEach(n => { n.seen = true; }); }
+  else if (op === "notified") { const k = clip(b.key, 300); if (!j.notified.includes(k)) j.notified = j.notified.concat([k]).slice(-500); }
   else if (op === "settings") {
     const q = b.quietHours; const qh = q && Number.isInteger(q.start) && Number.isInteger(q.end) && q.start >= 0 && q.start < 24 && q.end >= 0 && q.end < 24 ? { start: q.start, end: q.end } : null;
     j.settings = { notify: b.notify === true, quietHours: qh };
@@ -315,11 +425,21 @@ function readBody(req, max) {
   });
 }
 const num = (v, d, lo, hi) => Number.isInteger(v) ? Math.max(lo, Math.min(hi, v)) : d;
-export function createApi({ env = {}, stateDir, pkgRoot, log = () => {}, fetchImpl } = {}) {
+export function createApi({ env = {}, stateDir, pkgRoot, root = null, log = () => {}, fetchImpl, refreshFetch } = {}) {
   const token = randomBytes(32).toString("base64url");
   const keys = { session: null, env: typeof env.XAI_API_KEY === "string" && env.XAI_API_KEY.trim().length >= 16 ? env.XAI_API_KEY.trim() : null };
   const base = baseUrlFrom(env); const store = new WatchStore(stateDir, pkgRoot || "/nonexistent-package-root");
   const runs = new Map();
+  const snaps = new SnapshotStore(store.problem ? null : stateDir);
+  const fixtures = typeof env.GTB_REFRESH_FIXTURES === "string" && isAbsolute(env.GTB_REFRESH_FIXTURES) ? env.GTB_REFRESH_FIXTURES : null;
+  let bundledCache; const bundled = () => (bundledCache === undefined ? (bundledCache = root ? readBundled(root) : null) : bundledCache);
+  let refreshing = false;
+  const currentDoc = () => (store.problem ? null : snaps.read());
+  const currentLive = () => { const d = currentDoc(); if (d) return d.live; const b = bundled(); return b ? b.live : null; };
+  const withCurrent = (j) => { const live = currentLive(); return { ...j, items: (j.items || []).map(it => ({ ...it, current: live ? readingFor(live, it.stableId) : null })) }; };
+  const refreshInfo = () => { const d = currentDoc(); const l = d && d.live.lastRun;
+    return { mode: "user-started", available: !store.problem, problem: store.problem || null, fixtureMode: !!fixtures, refreshable: REFRESHABLE, providers: Object.entries(PROVIDERS).map(([id, p]) => ({ id, host: p.host, label: p.label, fetches: p.fetches, rights: p.rights, units: p.units, keyless: true })),
+      last: l ? { runId: l.id, at: l.at, fixture: !!l.fixture, ok: l.ok, units: l.units } : null, snapshot: d ? "refreshed" : "bundled", bundledGeneratedAt: (bundled() && bundled().live && bundled().live.generatedAt) || null }; };
   const secrets = () => [keys.session, keys.env].filter(Boolean);
   const say = (m) => log(redact(m, secrets()));
   const key = () => keys.session || keys.env;
@@ -342,7 +462,7 @@ export function createApi({ env = {}, stateDir, pkgRoot, log = () => {}, fetchIm
     if (!/^application\/json(\s*;\s*charset=utf-8)?$/i.test(String(req.headers["content-type"] || ""))) return send(res, 415, { error: "JSON only" });
     if (path === "/api/session") {
       // Same-origin only (Origin + X-GTB-Request checked above; no CORS, so a cross-site page can never read this token).
-      return send(res, 200, { token, grok: status(), watchlist: { available: !store.problem, problem: store.problem || null, persisted: !store.problem && existsSync(store.file || "") }, refresh: { mode: "snapshot-only", reason: "the npm package bundles a data snapshot and no refresh runner; refresh from a clone of the repository" } });
+      return send(res, 200, { token, grok: status(), watchlist: { available: !store.problem, problem: store.problem || null, persisted: !store.problem && existsSync(store.file || "") }, refresh: refreshInfo() });
     }
     if (!tokenOk(req)) return send(res, 403, { error: "missing or wrong session token" });
     let b; try { const raw = await readBody(req, LIMITS.bodyBytes); b = JSON.parse(raw || "{}"); if (!b || typeof b !== "object" || Array.isArray(b)) throw Object.assign(new Error("bad"), { http: 400 }); }
@@ -356,7 +476,22 @@ export function createApi({ env = {}, stateDir, pkgRoot, log = () => {}, fetchIm
     if (path === "/api/investigate/cancel") { const r = runs.get(String(b.runId || "")); if (r) r.abort({ code: "CANCELLED" }); return send(res, 200, { cancelled: !!r }); }
     if (path === "/api/watchlist") {
       if (store.problem) return send(res, 409, { error: "watchlist unavailable: " + store.problem });
-      try { const r = watchOp(store, b); return send(res, r.error ? 400 : 200, r); } catch (e) { return send(res, 500, { error: "could not save the watchlist" }); }
+      try { const r = watchOp(store, b, currentLive()); return send(res, r.error ? 400 : 200, r.error ? r : withCurrent(r)); } catch (e) { return send(res, 500, { error: "could not save the watchlist" }); }
+    }
+    if (path === "/api/refresh") {
+      if (store.problem) return send(res, 409, { error: "refresh unavailable: " + store.problem });
+      if (refreshing) return send(res, 409, { status: "busy", error: "a refresh is already running" });
+      refreshing = true; const t0 = Date.now();
+      try {
+        const r = await runRefresh({ stateDir, root, fetchImpl: fixtures ? fixtureFetch(fixtures) : (refreshFetch || fetch), fixture: !!fixtures });
+        if (!r.ok) return send(res, r.busy ? 409 : 500, { status: r.busy ? "busy" : "error", error: r.error });
+        let watch = null;
+        const j = store.read();
+        if (!j.corrupt && j.items.length) { watch = applyRefreshToWatch(j, r.doc.live, { id: r.runId, at: r.at, fixture: r.fixture }); store.write(j); }
+        say(`Refresh ${r.runId}${r.fixture ? " (FIXTURE replay)" : ""}: ` + r.units.filter(u => REFRESHABLE.includes(u.module)).map(u => u.module + "=" + u.outcome + (u.error ? "(" + u.error + ")" : "")).join(", ") + ` in ${Date.now() - t0} ms`);
+        return send(res, 200, { status: "refreshed", runId: r.runId, at: r.at, fixture: r.fixture, units: r.units, providers: r.providers, watch: watch && { changed: watch.changed, unchanged: watch.unchanged, unknown: watch.unknown, stale: watch.stale, new: watch.new, notices: watch.notices } });
+      } catch (e) { say("Refresh failed: " + (e && e.name)); return send(res, 500, { status: "error", error: "refresh failed; the previous snapshot was kept" }); }
+      finally { refreshing = false; }
     }
     if (path === "/api/investigate") {
       if (!key()) return send(res, 409, { status: "disconnected", error: "Grok not connected: no XAI_API_KEY in the launch environment and no session key" });
@@ -374,7 +509,7 @@ export function createApi({ env = {}, stateDir, pkgRoot, log = () => {}, fetchIm
         const r = await investigate({ key: key(), packet: b.packet, question: typeof b.question === "string" ? b.question : "", opts, env, signal: ac.signal, fetchImpl: fetchImpl || fetch });
         const val = validateAnswer(r.text, b.packet, r.citations);
         say(`Grok: investigation ${runId} ${val.ok ? "answered" : "answer rejected"} in ${Date.now() - t0} ms (${r.usage.input_tokens} in / ${r.usage.output_tokens} out tokens reported)`);
-        return send(res, 200, { status: val.ok ? "answered" : "rejected", reason: val.reason, runId, provider: "xai", mock: r.mock, liveVerified: false, model: r.model, sections: val.sections, rejected: val.rejected, notes: val.notes,
+        return send(res, 200, { status: val.ok ? "answered" : "rejected", reason: val.reason, runId, provider: "xai", mock: r.mock, liveVerified: false, model: r.model, sections: val.sections, observed: val.observed, rejected: val.rejected, notes: val.notes,
           citations: r.citations.map(safeHttps).filter(Boolean).slice(0, 40), usage: r.usage, trace: r.trace, bounds: { turns: opts.turns, toolCalls: opts.toolCalls, functionCalls: opts.functionCalls, timeoutMs: opts.timeoutMs, outputTokens: opts.outputTokens, evidenceBytes: v.bytes, maxEvidenceBytes: opts.maxEvidenceBytes }, tools: { web: opts.web, x: opts.x } });
       } catch (e) {
         const code = e.code || "ERROR"; say(`Grok: investigation ${runId} failed: ${code}`);
@@ -384,5 +519,6 @@ export function createApi({ env = {}, stateDir, pkgRoot, log = () => {}, fetchIm
     }
     return send(res, 404, { error: "no such API" });
   }
-  return { handle, token, status, store, _keys: keys };
+  const refreshedJs = () => { const d = currentDoc(); return d ? refreshedScript(d) : null; };
+  return { handle, token, status, store, snaps, refreshedJs, currentLive, _keys: keys };
 }

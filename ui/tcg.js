@@ -23,7 +23,7 @@ function tcgData() {
   });
   return { C: { groups, syncedAt: null, adapters: REG.TCG_GAMES, artworkRights: "BLOCKED", attribution: "Card data: Scryfall (scryfall.com)." }, synced: false };
 }
-const tcgAge = (ts) => { const h = (Date.now() / 1000 - ts) / 3600; return h < 1 ? "under 1h ago" : h < 48 ? Math.round(h) + "h ago" : Math.round(h / 24) + " days ago"; };
+const tcgAge = (ts) => { const h = (Date.now() / 1000 - ts) / 3600; return h < 1 ? "under 1h ago" : h < 48 ? Math.round(h) + "h ago" : Math.round(h / 24) + "d ago"; }; // compact: the status line must stay on one line at 320px
 const TCG_KIND = [["tracked", "Tracked printing"], ["default", "Default printing"], ["alternate art", "Alternate art"], ["print variant", "Print variants"], ["reprint", "Reprints"]];
 const tcgAll = (C) => C.groups.flatMap(g => g.printings.map(p => ({ g, p })));
 function tcgMatch(p, g) {

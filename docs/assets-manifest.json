@@ -540,7 +540,42 @@
   "packages/cli/package.json": {
    "status": "project-generated",
    "source": "npm manifest for the zero-dependency local launcher; no data",
-   "sha256": "5f8db7702311f299d8e3f25c6a5b1bf27e06e8f37441ba46069b486a3732d382"
+   "sha256": "238d2b74363d1120b1e88859cc572982ed52bb61a797d3252a908a37bffc274f"
+  },
+  "packages/cli/test/fixtures/providers-20261101/MANIFEST.json": {
+   "status": "project-generated",
+   "source": "0.3.0 refresh test fixture manifest: request URLs, fetch time and SHA-256 of each recorded response",
+   "sha256": "adcedf310e198056d72b8408f1989959d4c58f42d3e385acc4724462d1ea6492"
+  },
+  "packages/cli/test/fixtures/providers-20261101/cftc.json": {
+   "status": "public-official",
+   "source": "0.3.0 refresh test fixture: recorded CFTC Commitments of Traders (Socrata 6dca-aqww) response for the tracked markets; replayed only in tests and labelled FIXTURE",
+   "sha256": "9aa5cee4d52bf4d3d196ead5757323fe76a6c6a2ef1de3ff24701fd4a839a546"
+  },
+  "packages/cli/test/fixtures/providers-20261101/ecb.csv": {
+   "status": "public-official",
+   "source": "0.3.0 refresh test fixture: recorded keyless responses from official publishers (ECB SDMX reference rates; FRED fredgraph DEXUSEU and EIA spot series), trimmed; replayed only via GTB_REFRESH_FIXTURES and labelled FIXTURE",
+   "sha256": "f786a02ff0979711ee3bfd2b0237333a6564d6de5075a43c571da4423757db52"
+  },
+  "packages/cli/test/fixtures/providers-20261101/fred-DCOILBRENTEU.csv": {
+   "status": "public-official",
+   "source": "0.3.0 refresh test fixture: recorded keyless responses from official publishers (ECB SDMX reference rates; FRED fredgraph DEXUSEU and EIA spot series), trimmed; replayed only via GTB_REFRESH_FIXTURES and labelled FIXTURE",
+   "sha256": "20ff58a0ca5f9c8ebbb4e1e79bce10795ca2e04e7301dbc647549bcd7f192200"
+  },
+  "packages/cli/test/fixtures/providers-20261101/fred-DCOILWTICO.csv": {
+   "status": "public-official",
+   "source": "0.3.0 refresh test fixture: recorded keyless responses from official publishers (ECB SDMX reference rates; FRED fredgraph DEXUSEU and EIA spot series), trimmed; replayed only via GTB_REFRESH_FIXTURES and labelled FIXTURE",
+   "sha256": "730ab45ae26782d6295445f1403fa14a670c3c6a327e8b12bc5937ac87b48c62"
+  },
+  "packages/cli/test/fixtures/providers-20261101/fred-DEXUSEU.csv": {
+   "status": "public-official",
+   "source": "0.3.0 refresh test fixture: recorded keyless responses from official publishers (ECB SDMX reference rates; FRED fredgraph DEXUSEU and EIA spot series), trimmed; replayed only via GTB_REFRESH_FIXTURES and labelled FIXTURE",
+   "sha256": "7d41648fb406c8102f1090e84ef82016dedea763741d61b5ccd03cbf14dffa4d"
+  },
+  "packages/cli/test/fixtures/providers-20261101/fred-DHHNGSP.csv": {
+   "status": "public-official",
+   "source": "0.3.0 refresh test fixture: recorded keyless responses from official publishers (ECB SDMX reference rates; FRED fredgraph DEXUSEU and EIA spot series), trimmed; replayed only via GTB_REFRESH_FIXTURES and labelled FIXTURE",
+   "sha256": "f10fc60d366e2ca081363bd111723eb9ea4e89312c8e7c8bef7304062a73398f"
   },
   "tests/fixtures/adjudication-vignettes-r7.json": {
    "status": "synthetic",

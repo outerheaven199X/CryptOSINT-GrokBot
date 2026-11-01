@@ -311,6 +311,12 @@ footer .links{flex-wrap:wrap}
 .hpulse .pr .sq{width:8px;height:8px}.hpulse .pr .pt{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.hpulse .pr .pa{color:var(--m);font-size:10px}
 @media (max-width:420px){.hpulse .pr{grid-template-columns:8px minmax(0,1fr)}.hpulse .pr .pa{grid-column:2}}
 @media print{#ticker,nav#views,header,#feed,#stageWrap,.ask,.invacts,.send,.rck{display:none!important}body,#root,.card{background:#fff!important;color:#000!important}.inv{display:block}.rail{position:static}a{color:#000}}
+/* 0.3.0: Refresh status, Pulse filter disclosure, watchlist evidence rows (v6 tokens only) */
+.rruns{display:flex;flex-direction:column;gap:2px;margin:6px 0}.rrun{display:grid;grid-template-columns:70px minmax(0,1fr) minmax(0,1.2fr);gap:4px 10px;font-size:11px;border-bottom:1px solid var(--l);padding:3px 0;overflow-wrap:anywhere}.rrun .rm{color:var(--y)}.rrun .dim{grid-column:2/-1}.rrun[data-outcome^=failed]{color:var(--r)}
+#watchRefresh .lim,#pulseRefresh .lim{overflow-wrap:anywhere;min-width:0}#watchRefresh,#pulseRefresh{min-width:0}
+.pfd>summary{list-style:none;cursor:pointer;display:none;align-items:center;min-height:44px;font-size:12px;letter-spacing:.08em;text-transform:uppercase;color:var(--w)}.pfd>summary::-webkit-details-marker{display:none}.pfd>summary::after{content:" +";color:var(--y);margin-left:4px}.pfd[open]>summary::after{content:" −"}.pfd>summary:focus-visible{outline:2px solid var(--y)}
+.wev{font-size:11px}.wunk{color:var(--m)}.erow.unseen{border-left:2px solid var(--y)}.wtx{overflow-wrap:anywhere}
+@media (max-width:767px){.pfd{padding-top:4px;padding-bottom:4px}.pfd>summary{display:flex}.pfd[open]>summary{margin-bottom:8px}.tst1{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.rrun{grid-template-columns:56px minmax(0,1fr)}.rrun>span:nth-child(3){grid-column:2}}
 </style>
 <script type="importmap">{"imports":{"three":"./vendor/three/build/three.module.min.js","three/addons/":"./vendor/three/examples/jsm/"}}</script>
 </head>
@@ -360,6 +366,7 @@ footer .links{flex-wrap:wrap}
 </div>
 <script src="data/reports.js"></script>
 <script src="data/everything.js"></script>
+<script src="data/refreshed.js"></script>
 <script src="registry.js"></script>
 <script src="cache/tcg/mtg/explorer.js"></script>
 <script src="tcg.js"></script>
