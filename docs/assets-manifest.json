@@ -540,7 +540,7 @@
   "packages/cli/package.json": {
    "status": "project-generated",
    "source": "npm manifest for the zero-dependency local launcher; no data",
-   "sha256": "238d2b74363d1120b1e88859cc572982ed52bb61a797d3252a908a37bffc274f"
+   "sha256": "4e094367f1be993eaa5c0c29af194d24c8b3846d85d6c7dced31eb7b06104cce"
   },
   "packages/cli/test/fixtures/providers-20261101/MANIFEST.json": {
    "status": "project-generated",

@@ -23,7 +23,7 @@ export const REFRESHABLE = ["fx", "fx-h10", "energy", "cot"];
 const CADENCE = { fx: 86400, "fx-h10": 86400, energy: 86400, cot: 86400, metals: 86400, mtg: 86400, cs2: 86400 };
 // Upstream publication lag that is still "current" for each source (weekends, holidays, release schedules).
 export const MAX_UPSTREAM_AGE_DAYS = { fx: 5, "fx-h10": 12, energy: 12, cot: 12 };
-const UA = "grok-the-block/0.3.0 (local research preview; user-started refresh)";
+const UA = "grok-the-block/0.3.1 (local research preview; user-started refresh)";
 const FX_CCYS = ["USD", "JPY", "GBP", "CHF", "CNY", "AUD", "CAD", "MXN", "TRY", "INR", "BRL", "ZAR", "SEK", "NOK", "KRW", "PLN"];
 const ENERGY_FRED = { DCOILWTICO: "WTI crude oil spot (EIA via FRED)", DCOILBRENTEU: "Brent crude oil spot (EIA via FRED)", DHHNGSP: "Henry Hub natural gas spot (EIA via FRED)" };
 const COT_MARKETS = { "GOLD - COMMODITY EXCHANGE INC.": "Gold futures (COMEX)", "SILVER - COMMODITY EXCHANGE INC.": "Silver futures (COMEX)", "WTI-PHYSICAL - NEW YORK MERCANTILE EXCHANGE": "WTI crude futures (NYMEX)",
@@ -273,7 +273,7 @@ export function mergeSnapshot(prev, results, now, { fixture = false, runId, prev
   // everything else is carried exactly as it was, labelled: this launcher does not refresh it
   const other = (x) => !REFRESHABLE.includes(unitOf(x));
   out.signals.push(...(prev.signals || []).filter(other).map(s => stamp(s))); out.probes.push(...(prev.probes || []).filter(other).map(p => stamp(p))); out.assets.push(...(prev.assets || []).filter(other).map(a => stamp(a)));
-  for (const c of (prev.coverage || []).filter(c => !REFRESHABLE.includes(c.module))) { out.coverage.push({ ...c, freshness: c.freshness === "carried-after-failure" ? c.freshness : "bundled-snapshot", ingestedAt: c.ingestedAt ?? pIng, note: "Not refreshed by the npx launcher in 0.3.0; shown from the " + (prevSource === "bundled" ? "bundled package snapshot" : "previous snapshot") + "." });
+  for (const c of (prev.coverage || []).filter(c => !REFRESHABLE.includes(c.module))) { out.coverage.push({ ...c, freshness: c.freshness === "carried-after-failure" ? c.freshness : "bundled-snapshot", ingestedAt: c.ingestedAt ?? pIng, note: "Not refreshed by the npx launcher in 0.3.1; shown from the " + (prevSource === "bundled" ? "bundled package snapshot" : "previous snapshot") + "." });
     if (!units.some(x => x.module === c.module)) units.push({ module: c.module, outcome: "not-refreshable", freshness: "bundled-snapshot", sourceAsOf: c.sourceAsOf || null, lastSuccessAt: c.lastSuccessAt || null }); }
   for (const h of (prev.health || []).filter(h => !REFRESHABLE.includes(h.module))) out.health.push(h);
   const keys = out.signals.map(s => s.key); if (new Set(keys).size !== keys.length) throw new Error("duplicate observation ids after merge");

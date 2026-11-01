@@ -1,4 +1,4 @@
-"""0.3.0 end-to-end acceptance against the ACTUAL npm pack tarball installed into a clean temporary prefix (Linux box).
+"""0.3.1 end-to-end acceptance (0.3.0 checks plus the 0.3.1 regression checks) against the ACTUAL npm pack tarball installed into a clean temporary prefix (Linux box).
 Step A uses the LIVE keyless providers (real network). Step B restarts the same install with GTB_REFRESH_FIXTURES pointing at a
 FIXTURE second snapshot (the recorded real responses with the last EUR/TRY fix moved +6% and the CFTC file removed) to show a
 genuine change, an unchanged reading and a failed provider; everything from step B is labelled FIXTURE in the UI and files.
@@ -14,7 +14,7 @@ def res(n, c, info=""):
     global ok, fails
     ok += bool(c); fails += (not c); line = ("PASS " if c else "FAIL ") + n + ("" if c else " - " + str(info)[:400]); print(line, flush=True); LOG.append(line)
 def note(s): print("NOTE " + s, flush=True); LOG.append("NOTE " + s)
-T = Path(tempfile.mkdtemp(prefix="gtb030-acc-")); PFX, CACHE, HOME, STATE = T / "prefix", T / "npm-cache", T / "home", T / "state"
+T = Path(tempfile.mkdtemp(prefix="gtb031-acc-")); PFX, CACHE, HOME, STATE = T / "prefix", T / "npm-cache", T / "home", T / "state"
 for d in (PFX, CACHE, HOME): d.mkdir()
 env0 = {"PATH": os.environ["PATH"], "HOME": str(HOME), "npm_config_cache": str(CACHE), "npm_config_prefix": str(PFX), "npm_config_userconfig": str(T / "npmrc-empty"), "npm_config_update_notifier": "false", "npm_config_fund": "false", "npm_config_audit": "false"}
 (T / "npmrc-empty").write_text("")
@@ -25,7 +25,8 @@ res("install: npm install -g of the tarball into a clean prefix and cache (no cl
 pkgdir = PFX / "lib" / "node_modules" / "grok-the-block"
 res("install: zero dependencies installed (node_modules contains only grok-the-block)", sorted(os.listdir(PFX / "lib" / "node_modules")) == ["grok-the-block"] and not (pkgdir / "node_modules").exists())
 v = subprocess.run([str(BIN), "--version"], env=env0, capture_output=True, text=True).stdout.strip()
-res("installed version is 0.3.0", v == "0.3.0", v)
+WANT = json.loads((REPO / "packages/cli/package.json").read_text())["version"]
+res(f"installed version is {WANT} (the repo package.json)", v == WANT == "0.3.1", v)
 
 def launch(extra=None):
     e = dict(env0, GTB_STATE_DIR=str(STATE)); e.update(extra or {})
@@ -82,12 +83,22 @@ with sync_playwright() as pw:
         nread = pg.locator("#pulseReadings [data-prov='refreshed'] [data-inv]").count()
         res("A: Pulse lists real refreshed readings (labelled refreshed, with source dates), none labelled fixture", nread >= 1 and pg.locator("#panel [data-prov='fixture']").count() == 0 and "source as of 20" in T_(pg, "#pulseReadings"), T_(pg, "#pulseReadings")[:300])
         pg.screenshot(path=str(SH / "acc-02-pulse-after-live-refresh.png"))
+        # 0.3.1 fix 1: every Refreshed readings row starts with its severity square, so the text column is not squeezed
+        rr = pg.evaluate("[...document.querySelectorAll('#pulseReadings .erow')].map(e=>[e.firstElementChild.className, Math.round(e.querySelector('.ti').getBoundingClientRect().width)])")
+        res("A 0.3.1: Refreshed readings rows have the severity square and a full-width text column", rr and all(c == "sq" and w > 150 for c, w in rr), rr)
+        # 0.3.1 fix 4: after a live refresh, nothing in Real observations is labelled current unless the refresh fetched it
+        pv = pg.evaluate("[...document.querySelectorAll('#pulseReal [data-pkey]')].map(e=>[e.dataset.pkey.split(':')[0], e.dataset.prov, e.closest('[data-group]') ? e.closest('[data-group]').dataset.group : null])")
+        grp = pg.evaluate("[...document.querySelectorAll('#pulseReal [data-group]')].map(e=>e.dataset.group)")
+        res("A 0.3.1: Real observations: refreshed group first, bundled stablecoin/prediction rows grouped and labelled bundled, none 'cached'", grp[:1] == ["refresh"] and pv and all((g == "bundled") == (p == "bundled") and p != "cached" for m, p, g in pv) and all(p == "bundled" for m, p, g in pv if m in ("stablecoins", "polymarket", "kalshi")) and ("BUNDLED SNAPSHOT (CACHED, NOT REFRESHED)" in T_(pg, "#pulseReal").upper() if any(p == "bundled" for m, p, g in pv) else True), (grp, pv[:6]))
         pg.click("#pulseReadings [data-inv] >> nth=0"); pg.wait_for_timeout(600)
         first = pg.evaluate("GTB.inv.IV.ref")
         res("A: investigate a refreshed reading: detector state and source date shown, no FIXTURE banner", "Source as of" in T_(pg, "#panel") and "FIXTURE" not in T_(pg, "#panel"), T_(pg, "#panel")[:300])
         pg.screenshot(path=str(SH / "acc-03-investigate-live.png"))
         d1 = export_json(pg); pg.wait_for_timeout(1200); d2 = export_json(pg)
         res("A: case file is reproducible within a session (same contentSha256 and exportSha256)", d1["contentSha256"] == d2["contentSha256"] and d1["exportSha256"] == d2["exportSha256"], (d1.get("contentSha256"), d2.get("contentSha256")))
+        # 0.3.1 fix 3: the case file says what the data is: live-refreshed only when the source's coverage is fresh, never for stale data
+        covf = {c["m"]: c["f"] for c in E["cov"]}; mod = d1["observations"][0]["module"]; want = {"fresh": "real-live-refreshed", "upstream-stale": "real-stale-upstream", "carried-after-failure": "real-stale-carried"}.get(covf.get(mod), "real-cached-bundled")
+        res("A 0.3.1: case file data status matches the source freshness (live-refreshed only if fresh) with the provider as-of date", d1["evidence"]["dataStatus"] == want and d1["evidence"]["sourceAsOf"] and d1["evidence"]["observed"] == "real-cached" and (want != "real-live-refreshed" or d1["evidence"]["refreshRun"] == E["r"]["runId"]), (mod, covf.get(mod), d1.get("evidence")))
         res("A: case file records the refreshed snapshot (run id, not fixture, provider date)", d1["snapshot"]["runId"] == E["r"]["runId"] and d1["snapshot"]["fixture"] is False and d1["snapshot"].get("sourceAsOf"), d1.get("snapshot"))
         (OUT / "case-A-live.json").write_text(json.dumps(d1, indent=2))
         pg.click("#invWatch"); pg.wait_for_timeout(500)
@@ -135,7 +146,11 @@ with sync_playwright() as pw:
         res("B: investigating the fixture observation shows the FIXTURE banner and the flagged state", "FIXTURE" in T_(pg, "#panel") and "flagged by the detector" in T_(pg, "#panel"), T_(pg, "#panel")[:300])
         pg.screenshot(path=str(SH / "acc-07-investigate-fixture-change.png"))
         dB = export_json(pg); (OUT / "case-B-fixture.json").write_text(json.dumps(dB, indent=2))
-        res("B: exported case file is marked FIXTURE (snapshot.fixture true, observation kind fixture-test)", dB["snapshot"]["fixture"] is True and dB["evidence"]["observed"] == "fixture-test", (dB.get("snapshot"), dB.get("evidence")))
+        res("B: exported case file is marked FIXTURE (snapshot.fixture true, observation kind fixture-test, data status fixture-replay)", dB["snapshot"]["fixture"] is True and dB["evidence"]["observed"] == "fixture-test" and dB["evidence"]["dataStatus"] == "fixture-replay", (dB.get("snapshot"), dB.get("evidence")))
+        # 0.3.1 fix 2: at 1280x720 the footer is compact and the full not-financial-advice notice is present
+        pg.set_viewport_size({"width": 1280, "height": 720}); pg.evaluate("GTB.go('pulse')"); pg.wait_for_timeout(500)   # Pulse: one-line header
+        fg = pg.evaluate("(()=>{const f=document.querySelector('footer').getBoundingClientRect(),p=document.getElementById('panel').getBoundingClientRect();return {f:Math.round(f.height),p:Math.round(p.height),t:document.querySelector('footer').innerText}})()")
+        res("B 0.3.1: at 1280x720 (Pulse) the footer is <=130px, the panel >=320px, and the full disclaimer is present", fg["f"] <= 130 and fg["p"] >= 320 and "NOT FINANCIAL ADVICE" in fg["t"].upper() and "Do your own research and consult a licensed professional." in fg["t"], fg)
         ctx.close()
     finally: stop(p)
     b.close()
