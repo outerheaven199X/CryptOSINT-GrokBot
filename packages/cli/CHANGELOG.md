@@ -1,5 +1,20 @@
 # Changelog
 
+## 0.3.1 (unreleased; not published to npm)
+
+**Grok the Block: The Best Way To Lose All Your Money.** This is a local research preview. Not financial advice.
+
+A fix release for four layout and labelling bugs found while recording the 0.3.0 launch video. No detector thresholds changed, no new dependencies, no redesign: v6 tokens, fonts and components only.
+
+### Fixes
+- **Pulse "Refreshed readings" at 1280 px.** The rows had no severity square, so the text fell into the 8 px square column and collapsed to one character per line. Each row now starts with its severity square (grey for a below-threshold reading) and the text uses the full column.
+- **Compact disclaimer footer on short desktop viewports.** At 1280x720 the static footer took 180 px and left about 283 px for the panel. On viewports at least 768 px wide and at most 820 px tall, the label and links now share one row and the disclaimer spans the full width below them: the footer is about 124 px and the panel about 339 px. The notice keeps its full text, its 11 px size, its colour and all three links. Taller desktops and phones keep the 0.3.0 layout.
+- **Case files report the real data status.** Exported case files said Data `real-cached` even right after a live refresh. The case file now carries `evidence.dataStatus`, a plain-language `dataStatusLabel`, the provider's `sourceAsOf` and the refresh run: `real-live-refreshed`, `real-stale-upstream`, `real-stale-carried`, `real-unavailable`, `real-stale-aged`, `real-cached-bundled`, `fixture-replay`, `synthetic-demo` or `imported-unverified`. "Live-refreshed" needs a fresh coverage row, a non-fixture refresh, a non-carried reading and an ingest time within the source's cadence, so stale upstream data is never marked fresh. `evidence.observed` (the observation kind) is unchanged for compatibility. The investigation rail shows the same status.
+- **Pulse Real observations after a refresh.** Bundled stablecoin, Polymarket, Kalshi, options and MTG items were mixed in with the refreshed provider data as if current. After a refresh the list now has two labelled groups: rows from the refresh first (refreshed, FIXTURE, stale upstream or carried), then the bundled snapshot rows, each labelled "bundled snapshot (cached, not refreshed)" with the snapshot's ingest time. Nothing is deleted. The home "What's weird" strip uses the same order and labels. Before any refresh nothing changes.
+
+### Tests
+- `tests/ui/ui_031.py` (browser) and `tests/test_release_031.py` (static), plus new 0.3.1 checks in `tests/e2e/acceptance_pack.py` against the packed tarball (live refresh and FIXTURE second snapshot).
+
 ## 0.3.0 "Fresh Case Files" (unreleased; not published to npm)
 
 **Grok the Block: The Best Way To Lose All Your Money.** This is a local research preview. Not financial advice.

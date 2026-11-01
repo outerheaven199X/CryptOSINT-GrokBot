@@ -83,6 +83,25 @@ function quality(O) {
   if (O.module === "mtg") { const hist = (EV.live.probes || []).find(p => p.module === "mtg" && p.asset === O.s.asset && p.state === "unknown" && /histor|snapshot/i.test(p.reason || "")); if (hist) q.push("MTG history: " + hist.reason); }
   return q;
 }
+// 0.3.1: what the data in a case actually is. "real-cached" (O.kind) only says it is real, not synthetic or imported; this adds
+// whether it came from a live user-started refresh, a refresh with stale upstream data, a failed refresh (last good kept),
+// a FIXTURE replay or the bundled snapshot. "live-refreshed" needs a fresh coverage row for this source, a non-fixture
+// refresh, a non-carried observation and an ingest time within the source cadence; anything else is never called fresh.
+function dataStatus(O) {
+  const cov = coverageFor(O.module), f = cov.freshness, R = EV.refreshed, asOf = O.sourceAsOf || cov.sourceAsOf || O.asOf || null, ing = isoOrNull(O.ingestedAt);
+  const mk = (status, label) => ({ status, label, sourceAsOf: asOf, ingestedAt: ing, refreshRun: R && !["real-cached-bundled", "synthetic-demo", "imported-unverified"].includes(status) ? R.runId : null });
+  if (O.kind === "synthetic-demo") return mk("synthetic-demo", KIND_LBL[O.kind]);
+  if (O.kind === "imported-unverified") return mk("imported-unverified", KIND_LBL[O.kind]);
+  if (O.kind === "fixture-test" || (R && R.fixture && f === "fresh")) return mk("fixture-replay", "FIXTURE replay (test data, not live provider data)" + (asOf ? "; recorded provider data as of " + asOf : ""));
+  if (O.carried || f === "carried-after-failure") return mk("real-stale-carried", "real data, stale: the last refresh of this source failed and the last good data was kept (ingested " + (ing || "unknown") + ")" + (asOf ? "; provider as of " + asOf : ""));
+  if (f === "upstream-stale") return mk("real-stale-upstream", "real data, refreshed " + (ing || "") + " but stale upstream: the provider last published " + (asOf || "unknown") + ", older than its usual cadence");
+  if (f === "unavailable") return mk("real-unavailable", "real data, source unavailable in the last refresh" + (asOf ? "; provider as of " + asOf : ""));
+  if (f === "fresh" && R && !stale(O)) return mk("real-live-refreshed", "real data, live-refreshed " + (ing || "") + " from the provider (user-started refresh " + R.runId + "); provider as of " + (asOf || "unknown"));
+  if (f === "fresh") return mk("real-stale-aged", "real data from an earlier refresh (ingested " + (ing || "unknown") + "), now older than this source's cadence: not fresh" + (asOf ? "; provider as of " + asOf : ""));
+  return mk("real-cached-bundled", "real data, cached: bundled package snapshot" + (R ? " (this source is not refreshed by the launcher)" : "") + (ing ? ", ingested " + ing : "") + (asOf ? "; provider as of " + asOf : ""));
+}
+const DS_SHORT = { "real-live-refreshed": "live-refreshed real data", "real-stale-upstream": "refreshed, stale upstream", "real-stale-carried": "stale: refresh failed, last good kept", "real-stale-aged": "real data, no longer fresh", "real-unavailable": "source unavailable", "real-cached-bundled": "cached real data (bundled snapshot)", "fixture-replay": "FIXTURE replay (test data, not live provider data)", "synthetic-demo": "Demo: synthetic example", "imported-unverified": "imported report (unverified)" };
+const DS_HEAD = { "real-live-refreshed": "live refresh", "real-stale-upstream": "stale upstream", "real-stale-carried": "stale (carried)", "real-stale-aged": "not fresh", "real-unavailable": "unavailable", "real-cached-bundled": "cached real data" };
 function stale(O) { const cov = coverageFor(O.module), ing = tsec(O.ingestedAt); return !!(O.carried || ["upstream-stale", "carried-after-failure", "unavailable"].includes(cov.freshness) || (ing && Date.now() / 1000 - ing > 2 * (cov.cadenceS || 86400))); }
 
 /* ---------------- correlate: explicit relationship types only ---------------- */
@@ -205,7 +224,7 @@ function vInvestigate(P) {
     return;
   }
   const { packet, bytes, redacted } = buildPacket(O, IV.rel), rels = related(O), cov = packet.coverage[0], ob = packet.observations[0], tr = ob.trigger || {};
-  head(O.name, "Investigation · " + catName(O.cat), [O.detector.replace(/_/g, " ").toLowerCase(), "observed " + iso(O.when), O.ingestedAt ? "ingested " + age(O.ingestedAt) : "ingest time unknown", KIND_LBL[O.kind]], null, `<button class="btn" data-view-go="pulse">Pulse</button>`);
+  head(O.name, "Investigation · " + catName(O.cat), [O.detector.replace(/_/g, " ").toLowerCase(), "observed " + iso(O.when), O.ingestedAt ? "ingested " + age(O.ingestedAt) : "ingest time unknown", DS_HEAD[dataStatus(O).status] || KIND_LBL[O.kind]], null, `<button class="btn" data-view-go="pulse">Pulse</button>`);
   const banner = [O.kind === "synthetic-demo" ? `<div class="card synbox"><div class="lim">Demo: synthetic example. Invented instrument and prices that exercise the detector; not market activity.</div></div>` : "",
     O.kind === "imported-unverified" ? `<div class="card limited"><div class="lim">Imported report: produced outside this app. Its values and links are unverified and treated as untrusted text.</div></div>` : "",
     O.quiet ? `<div class="card limited"><div class="lim">${/unknown/.test(O.title) ? "Unknown, not quiet. No verdict without data." : "Nothing past threshold in this snapshot. That is a measurement, not an all-clear."}</div></div>` : "",
@@ -217,7 +236,7 @@ function vInvestigate(P) {
     ${O.printing ? `<dt>Printing</dt><dd data-printing="${esc([O.printing.set, O.printing.cn, O.printing.lang || "en", O.printing.finish || "nonfoil"].join("|"))}">${esc(String(O.printing.set).toUpperCase())} #${esc(O.printing.cn)} · ${esc(O.printing.lang || "en")} · ${esc(O.printing.finish || "nonfoil")}</dd>` : ""}
     <dt>Source</dt><dd>${esc(O.module)}${cov.via ? " · " + esc(cov.via) : ""}</dd><dt>Status</dt><dd>${esc(cov.status || "UNKNOWN")}${cov.lastSuccessAt ? " · last success " + esc(iso(cov.lastSuccessAt)) : ""}</dd>
     <dt>Observed</dt><dd>${esc(iso(O.when))}</dd>${O.sourceAsOf || O.asOf ? `<dt>Source as of</dt><dd>${esc(O.sourceAsOf || O.asOf)}</dd>` : ""}${cov.freshness ? `<dt>Freshness</dt><dd data-freshness="${esc(cov.freshness)}">${esc(FRESH_LBL[cov.freshness] || cov.freshness)}</dd>` : ""}<dt>Ingested</dt><dd>${O.ingestedAt ? esc(iso(O.ingestedAt)) + " (" + esc(age(O.ingestedAt)) + ")" : "unknown"}</dd>
-    <dt>Data</dt><dd id="invKind" data-kind="${esc(O.kind)}">${esc(KIND_LBL[O.kind])}</dd><dt>Report</dt><dd class="mono">${esc(O.report)}</dd></dl>
+    <dt>Data</dt><dd id="invKind" data-kind="${esc(O.kind)}">${esc(KIND_LBL[O.kind])}</dd><dt>Data status</dt><dd id="invDataStatus" data-status="${esc(dataStatus(O).status)}">${esc(DS_SHORT[dataStatus(O).status] || dataStatus(O).status)}</dd><dt>Report</dt><dd class="mono">${esc(O.report)}</dd></dl>
     <h3 class="disp th3">Detector check</h3><dl class="kv"><dt>Observation</dt><dd class="mono" data-evidence-id="${esc(O.key)}">${esc(O.key)}</dd><dt>Detector</dt><dd>${esc(O.detector)}</dd><dt>State</dt><dd data-detector-state="${esc(ob.detectorState)}">${esc(ob.detectorState)}${ob.stale ? " · stale" : ""}</dd><dt>Severity</dt><dd>${sevSq(O.severity)} ${esc(O.severity)}</dd>
     ${tr.observed != null ? `<dt>Trigger</dt><dd>${esc(tr.observed)} vs threshold ${esc(tr.threshold)} ${esc(tr.unit || "")}</dd><dt>Window</dt><dd>${esc(tr.window || "—")}</dd>` : ""}</dl>
     <h3 class="disp th3">Quality</h3>${ob.dataQuality.map(q => `<div class="lim">${esc(q)}</div>`).join("")}
@@ -338,11 +357,13 @@ async function dossier(key, opt = {}) {
   const analysis = last ? { provider: "xai", model: last.model || null, mock: !!last.mock, liveVerified: false, question: last.question || null, answeredAt: last.at || null, sections: last.sections, rejected: last.rejected || [], notes: last.notes || [], sources: last.citations || [], usage: last.usage || null, bounds: last.bounds || null, tools: last.tools || null, packetIds: last.packetIds || [] }
     : { provider: "none", model: null, state: "Grok not connected", generatedBy: local.generatedBy, sections: local.sections, rejected: [], sources: [] };
   const failed = mine ? IV.answers.filter(a => a.status !== "answered").map(a => ({ status: a.status, at: a.at, error: clip(a.error || a.reason || "", 200) })) : [];
+  const ds = dataStatus(o);
   const caseId = "case_" + (await sha256(canon([o.stableId, packet.observations.map(x => x.id), packet.related.map(x => x.observationId), packet.sourceSnapshot.ingestedAt]))).slice(0, 20);
   const d = { schemaVersion: "gtb-investigation/v1", caseId, generatedAt: opt.now || new Date().toISOString().replace(/\.\d{3}Z$/, "Z"), generator: { app: "grok-the-block", surface: IV.apiState === "ok" ? "npx launcher" : "static preview" },
     instrument: packet.instrument, sourceSnapshot: packet.sourceSnapshot,
     observations: packet.observations.map(x => ({ id: x.id, detector: x.detector, module: x.module, severity: x.severity, basis: x.basis, trigger: x.trigger, metrics: x.metrics, observedAt: x.observedAt, asOf: x.asOf, title: x.title, what: x.what, evidenceRefs: x.evidenceRefs, dataQuality: x.dataQuality, kind: x.kind })),
-    evidence: { observed: o.kind, synthetic: o.kind === "synthetic-demo", note: o.kind === "real-cached" ? "Observed evidence from the cached real snapshot; no synthetic data in this case." : KIND_LBL[o.kind] },
+    evidence: { observed: o.kind, dataStatus: ds.status, dataStatusLabel: ds.label, sourceAsOf: ds.sourceAsOf, refreshRun: ds.refreshRun, synthetic: o.kind === "synthetic-demo",
+      note: ds.status === "real-live-refreshed" ? "Observed evidence from a user-started live refresh of a keyless public provider; no synthetic data in this case." : o.kind === "real-cached" ? "Observed real evidence (" + (DS_SHORT[ds.status] || ds.status) + "); no synthetic data in this case." : KIND_LBL[o.kind] },
     related: packet.related.map(r => ({ observationId: r.observationId, relation: r.relation, confidence: r.confidence, detector: r.detector, observedAt: r.observedAt, kind: r.kind })),
     provenance: { sources: packet.sources, coverage: packet.coverage }, analysis, failedRequests: failed.length ? failed : undefined,
     snapshot: EV.refreshed ? { source: "user-started refresh (npx launcher)", runId: EV.refreshed.runId, refreshedAt: isoOrNull(EV.refreshed.at), fixture: EV.refreshed.fixture, freshness: packet.sourceSnapshot.freshness, sourceAsOf: packet.sourceSnapshot.sourceAsOf, ingestedAt: packet.sourceSnapshot.ingestedAt }
@@ -369,7 +390,7 @@ function dossierHTML(d) {
 <body><main><h1>${e(d.instrument.name || d.instrument.stableId)}</h1><div class="m">Grok The Block investigation · case <span data-case-id="${e(d.caseId)}">${e(d.caseId)}</span> · generated ${e(d.generatedAt)}</div>
 ${d.evidence.synthetic ? `<p class="syn">Demo: synthetic example. Invented instrument and prices; not market activity.</p>` : ""}
 <h2>Instrument</h2>${kv([["Stable id", d.instrument.stableId], ["Asset class", d.instrument.assetClass], ["Module", d.instrument.module], ["Printing", pr ? [pr.provider, pr.id, String(pr.set).toUpperCase(), "#" + pr.cn, pr.lang, pr.finish].join(" · ") : null], ["Rights", d.instrument.rights]])}
-<h2>Source snapshot</h2>${kv([["Data", d.evidence.observed], ["As of", d.sourceSnapshot.asOf], ["Ingested", d.sourceSnapshot.ingestedAt], ["Report", d.sourceSnapshot.report], ["Evidence", d.evidence.note]])}
+<h2>Source snapshot</h2>${kv([["Data", d.evidence.dataStatusLabel || d.evidence.observed], ["Data status", d.evidence.dataStatus], ["Kind", d.evidence.observed], ["Provider as of", d.evidence.sourceAsOf], ["As of", d.sourceSnapshot.asOf], ["Ingested", d.sourceSnapshot.ingestedAt], ["Report", d.sourceSnapshot.report], ["Evidence", d.evidence.note]])}
 <h2>Observations</h2>${d.observations.map(x => `<h3 data-evidence-id="${e(x.id)}">${e(x.id)}</h3>${kv([["Detector", x.detector], ["Severity", x.severity], ["Basis", x.basis], ["Trigger", x.trigger ? x.trigger.observed + " vs threshold " + x.trigger.threshold + " " + (x.trigger.unit || "") + (x.trigger.window ? " over " + x.trigger.window : "") : null], ["Observed at", x.observedAt], ["As of", x.asOf], ["Finding", x.title], ["Detail", x.what], ["Data quality", (x.dataQuality || []).join("; ")], ["Evidence refs", (x.evidenceRefs || []).join(", ")]])}`).join("")}
 <h2>Analysis</h2>${kv([["Provider", d.analysis.provider === "none" ? "none (Grok not connected)" : "xAI"], ["Model", d.analysis.model ? d.analysis.model + (d.analysis.mock ? " (mock xAI endpoint, test)" : "") : null], ["Live API verified", d.analysis.provider === "xai" ? "no" : null], ["Usage (as reported)", d.analysis.usage ? (d.analysis.usage.reported ? d.analysis.usage.input_tokens + " in / " + d.analysis.usage.output_tokens + " out tokens, " + d.analysis.usage.num_server_side_tools_used + " search calls" : "not reported") : null]])}${sec(d.analysis)}
 ${(d.analysis.rejected || []).length ? `<h3>Rejected claims</h3><ul>${d.analysis.rejected.map(r => `<li>${e(r.section)}: ${e(r.reason)}</li>`).join("")}</ul>` : ""}
@@ -406,10 +427,17 @@ function pulseFilter(items) {
   return items.filter(x => (f.cat === "all" || x.cat === f.cat) && (f.sev === "all" || x.sev === f.sev) && (f.fresh === "all" || (x.ageS != null && (f.fresh === "24h" ? x.ageS < 86400 : f.fresh === "7d" ? x.ageS < 7 * 86400 : x.ageS >= 7 * 86400))))
     .sort((a, b) => SEVR(b.sev) - SEVR(a.sev) || (tsec(b.when) || 0) - (tsec(a.when) || 0));
 }
-const provOf = (it) => it.mode === "examples" ? "synthetic" : it.mode === "experimental" ? "experimental" : it.fixture ? "fixture" : it.carried ? "carried" : EV.refreshed && it.o && coverageFor(it.o.module).freshness === "fresh" ? "refreshed" : "cached";
+// Provenance of a Pulse row. After a refresh, anything the refresh did not fetch is "bundled" (cached snapshot), never current.
+const provOf = (it) => { if (it.mode === "examples") return "synthetic"; if (it.mode === "experimental") return "experimental"; if (it.fixture) return "fixture"; if (it.carried) return "carried";
+  if (!it.o) return EV.refreshed ? "bundled" : "cached";
+  const ds = dataStatus(it.o).status;
+  return ds === "fixture-replay" ? "fixture" : ds === "real-stale-carried" ? "carried" : ds === "real-stale-upstream" ? "stale" : ds === "real-live-refreshed" ? "refreshed" : ds === "real-stale-aged" ? "aged" : EV.refreshed ? "bundled" : "cached"; };
+const PROV_LBL = { synthetic: "Demo · synthetic", experimental: "experimental", fixture: "FIXTURE replay", carried: "carried (refresh failed, stale)", stale: "refreshed · stale upstream", refreshed: "refreshed", aged: "earlier refresh · not fresh", bundled: "bundled snapshot (cached, not refreshed)", cached: "cached" };
+const FROM_REFRESH = new Set(["fixture", "carried", "stale", "refreshed", "aged"]);
 function pRow(it) {
-  return `<div class="erow${it.mode === "examples" ? " syn" : ""}" data-pkey="${esc(it.key)}" data-mode="${esc(it.mode)}" data-prov="${provOf(it)}">${sevSq(it.sev)}<span class="eb"><span class="hd"><span>${esc(catName(it.cat))} // ${esc(it.instrument)}</span><span>${esc(String(it.type).replace(/_/g, " ").toLowerCase())} · ${esc(it.sev || "no severity")}</span></span><span class="ti">${esc(it.title)}</span>
-  <span class="hd"><span>${it.mode === "examples" ? "Demo · synthetic · " : it.mode === "experimental" ? "experimental · " : it.fixture ? "FIXTURE replay · " : it.carried ? "carried (refresh failed) · " : EV.refreshed && it.o && coverageFor(it.o.module).freshness === "fresh" ? "refreshed · " : "cached · "}observed ${esc(iso(it.when))} · ${esc(age(it.when))}</span><span>source ${esc(it.source)} · ${esc(it.health)} · ${esc(it.quality)}${it.reports.size > 1 ? " · co-reported in " + it.reports.size + " reports, counted once" : ""}</span></span></span>
+  const pv = provOf(it);
+  return `<div class="erow${it.mode === "examples" ? " syn" : ""}" data-pkey="${esc(it.key)}" data-mode="${esc(it.mode)}" data-prov="${pv}">${sevSq(it.sev)}<span class="eb"><span class="hd"><span>${esc(catName(it.cat))} // ${esc(it.instrument)}</span><span>${esc(String(it.type).replace(/_/g, " ").toLowerCase())} · ${esc(it.sev || "no severity")}</span></span><span class="ti">${esc(it.title)}</span>
+  <span class="hd"><span>${esc(PROV_LBL[pv])} · observed ${esc(iso(it.when))} · ${esc(age(it.when))}</span><span>source ${esc(it.source)} · ${esc(it.health)} · ${esc(it.quality)}${it.reports.size > 1 ? " · co-reported in " + it.reports.size + " reports, counted once" : ""}</span></span></span>
   <span class="ea">${it.investigable ? `<button class="btn y" data-inv="${esc(it.key)}">Investigate</button>` : `<span class="dim">not investigable</span>`}</span></div>`;
 }
 const phone = () => { try { return matchMedia("(max-width: 767px)").matches; } catch (e) { return false; } };
@@ -443,9 +471,16 @@ function readingsCard() {
   const mods = new Set(R.lastRun.units.filter(u => u.outcome === "fetched" || u.outcome === "failed-carried").map(u => u.module === "fx-h10" ? "fx" : u.module));
   const xs = [...index().values()].filter(o => o.set === "live" && o.quiet && mods.has(o.module)).sort((a, b) => (+((b.trigger || {}).observed) || 0) - (+((a.trigger || {}).observed) || 0));
   if (!xs.length) return "";
-  const row = (o) => { const pv = o.kind === "fixture-test" ? "fixture" : o.carried ? "carried" : "refreshed", st = detState(o);
-    return `<div class="erow" data-pkey="${esc(o.key)}" data-prov="${pv}" data-state="${st}"><span class="eb"><span class="hd"><span>${esc(catName(o.cat))} // ${esc(o.name)}</span><span>${esc(st === "below-threshold" ? "below threshold" : st)}</span></span><span class="ti">${esc(o.title)}</span><span class="hd"><span>${pv === "fixture" ? "FIXTURE replay · " : pv === "carried" ? "carried (refresh failed) · " : "refreshed · "}source as of ${esc(o.sourceAsOf || "unknown")}</span><span>fetched ${esc(age(o.ingestedAt))}</span></span></span><span class="ea"><button class="btn" data-inv="${esc(o.key)}">Investigate</button></span></div>`; };
+  const row = (o) => { const ds = dataStatus(o).status, pv = ds === "fixture-replay" ? "fixture" : ds === "real-stale-carried" ? "carried" : ds === "real-stale-upstream" ? "stale" : ds === "real-live-refreshed" ? "refreshed" : ds === "real-stale-aged" ? "aged" : "cached", st = detState(o);
+    return `<div class="erow" data-pkey="${esc(o.key)}" data-prov="${pv}" data-state="${st}">${sevSq(o.severity)}<span class="eb"><span class="hd"><span>${esc(catName(o.cat))} // ${esc(o.name)}</span><span>${esc(st === "below-threshold" ? "below threshold" : st)}</span></span><span class="ti">${esc(o.title)}</span><span class="hd"><span>${esc(PROV_LBL[pv])} · source as of ${esc(o.sourceAsOf || "unknown")}</span><span>fetched ${esc(age(o.ingestedAt))}</span></span></span><span class="ea"><button class="btn" data-inv="${esc(o.key)}">Investigate</button></span></div>`; };
   return `<div class="card" id="pulseReadings"><h2 class="disp">Refreshed readings</h2><div class="lim">${xs.length} checks from the last refresh, closest to threshold first. Below threshold is a measurement, not an all-clear.</div><div class="list">${xs.slice(0, 6).map(row).join("")}</div></div>`;
+}
+function realGroups(vis, empty) {
+  const R = EV.refreshed, fr = vis.filter(x => FROM_REFRESH.has(provOf(x))), bn = vis.filter(x => !FROM_REFRESH.has(provOf(x)));
+  if (!fr.length && !bn.length) return empty;
+  const lbl = (t) => `<div class="pgrp lab up">${t}</div>`;
+  return `<div data-group="refresh">${lbl(fr.length + " from the last refresh" + (R.fixture ? " · FIXTURE replay (test data)" : "") + " · " + esc(iso(R.at)))}${fr.map(pRow).join("") || `<div class="empty">Nothing from the last refresh crossed a detector threshold in this filter. The refreshed checks are listed under Refreshed readings.</div>`}</div>`
+    + (bn.length ? `<div data-group="bundled">${lbl(bn.length + " from the bundled snapshot · cached, not refreshed · ingested " + esc(iso(EV.bundledGeneratedAt || EV.live.generatedAt)))}${bn.map(pRow).join("")}</div>` : "");
 }
 function vPulse(P) {
   const all = pulseItems(), real = all.filter(x => x.mode === "cached"), exp = all.filter(x => x.mode === "experimental"), demo = all.filter(x => x.mode === "examples");
@@ -462,7 +497,7 @@ function vPulse(P) {
   // Phones: the filters live behind one "Filters" control (collapsed by default) so the first observation is on the first screen.
   const openF = !phone() || IV.pfOpen;
   P.innerHTML = `<details class="card pfd" id="pFilt"${openF ? " open" : ""}><summary id="pFiltS">Filters${nAct ? " · " + nAct + " active" : ""}</summary><div class="frow">${chips("Category filter", "cat", cats, v => v === "all" ? "All markets" : catName(v))}${chips("Freshness filter", "fresh", FRESH.map(x => x[0]), v => FRESH.find(x => x[0] === v)[1])}</div><div class="frow" style="margin-top:8px">${chips("Severity filter", "sev", sevs, v => v === "all" ? "Any severity" : v)}<button class="chip" id="pDemo" aria-pressed="${IV.demo}">Demo (synthetic examples)</button></div></details>
-  <div class="grid2"><div class="card"><h2 class="disp">Real observations</h2><div class="lim">Ranked by severity, then time. Only observations that passed the existing detector rules. ${R ? "From the refresh of " + esc(age(R.at)) + (R.fixture ? " (FIXTURE replay, test data)" : "") + "; each row shows its own source date." : "Cached, not live: bundled snapshot " + esc(age(EV.live.generatedAt)) + "."}</div><div class="list" id="pulseReal">${vis.map(pRow).join("") || empty}</div></div>
+  <div class="grid2"><div class="card"><h2 class="disp">Real observations</h2><div class="lim">Ranked by severity, then time. Only observations that passed the existing detector rules. ${R ? "Refresh of " + esc(age(R.at)) + (R.fixture ? " (FIXTURE replay, test data)" : "") + " first, then the bundled snapshot; each row shows its own source date." : "Cached, not live: bundled snapshot " + esc(age(EV.live.generatedAt)) + "."}</div><div class="list" id="pulseReal">${R ? realGroups(vis, empty) : vis.map(pRow).join("") || empty}</div></div>
   <div style="display:flex;flex-direction:column;gap:12px">${refreshCard("pulse")}${readingsCard()}<div class="card limited" id="pulseUnknown"><h2 class="disp">Unknown, not quiet</h2>${unk.map(c => `<div class="lim">${esc(c.src)}: ${esc(c.outcome)}${c.err ? " (" + esc(c.err) + ")" : ""}</div>`).join("") || `<div class="lim">Every source answered in the last refresh.</div>`}</div>
   <div class="card" id="pulseExp"><h2 class="disp">Experimental</h2><div class="lim">Undocumented or unverified sources, derived numbers only. Kept out of the ranked list.</div>${visE.map(pRow).join("") || `<div class="empty">None in this filter.</div>`}</div>
   ${IV.demo ? `<div class="card synbox" id="pulseDemo"><h2 class="disp">Demo: synthetic examples</h2><div class="lim">Invented instruments and prices that exercise the detectors. Not market activity.</div>${visD.map(pRow).join("") || `<div class="empty">None in this filter.</div>`}</div>` : ""}</div></div>`;
@@ -472,8 +507,8 @@ function vPulse(P) {
 }
 function homePulse(el) {
   if (!el) return;
-  const items = pulseFilter(pulseItems().filter(x => x.mode === "cached" && x.investigable)).slice(0, 3);
-  el.innerHTML = `<div class="hpl"><span class="lab up">What's weird right now?</span><button class="hpgo" data-view-go="pulse">Pulse ›</button></div>` + (items.map(it => `<button class="pr" data-inv="${esc(it.key)}"><span class="sq" style="background:${C[SEVC[it.sev]] || C.grey}"></span><span class="pt">${esc(it.instrument)} · ${esc(String(it.type).replace(/_/g, " ").toLowerCase())}</span><span class="pa">${it.fixture ? "fixture" : "cached"} · ${esc(age(it.when))}</span></button>`).join("")
+  const all = pulseFilter(pulseItems().filter(x => x.mode === "cached" && x.investigable)), items = all.filter(x => FROM_REFRESH.has(provOf(x))).concat(all.filter(x => !FROM_REFRESH.has(provOf(x)))).slice(0, 3);
+  el.innerHTML = `<div class="hpl"><span class="lab up">What's weird right now?</span><button class="hpgo" data-view-go="pulse">Pulse ›</button></div>` + (items.map(it => `<button class="pr" data-inv="${esc(it.key)}"><span class="sq" style="background:${C[SEVC[it.sev]] || C.grey}"></span><span class="pt">${esc(it.instrument)} · ${esc(String(it.type).replace(/_/g, " ").toLowerCase())}</span><span class="pa">${esc(({ fixture: "fixture", bundled: "bundled", refreshed: "refreshed", stale: "stale upstream", carried: "stale", aged: "not fresh" })[provOf(it)] || "cached")} · ${esc(age(it.when))}</span></button>`).join("")
     || `<div class="pr">No observation past threshold. ${EV.refreshed ? "Last refresh " + esc(age(EV.refreshed.at)) : "Bundled snapshot " + esc(age(EV.live.generatedAt))}.</div>`);
 }
 
@@ -545,7 +580,7 @@ document.addEventListener("click", (e) => { const rb = e.target.closest("[data-r
 // Boot: look for the launcher API (same origin only). Load the watchlist and check verified changes only when it exists.
 try { const m = sessionStorage.getItem("gtb-refresh-msg"); if (m) { IV.refreshMsg = m; sessionStorage.removeItem("gtb-refresh-msg"); } } catch (e) {}
 session().then(a => { if (a) loadWatch().then(checkNotify).then(() => { if (["watch", "investigate", "pulse"].includes(S.view)) render(); }); else if (["watch", "investigate", "pulse"].includes(S.view)) render(); });
-return { open, vInvestigate, vPulse, vWatch, homePulse, dossier, dossierHTML, index, IV, session, canon, sha256, pulseItems, compare, checkNotify, loadWatch, quietNow, doRefresh, observedFromPacket,
+return { dataStatus: (k) => dataStatus(index().get(k)), provOf: (k) => { const it = pulseItems().find(x => x.key === k); return it ? provOf(it) : null; }, open, vInvestigate, vPulse, vWatch, homePulse, dossier, dossierHTML, index, IV, session, canon, sha256, pulseItems, compare, checkNotify, loadWatch, quietNow, doRefresh, observedFromPacket,
   buildPacket: (k, sel) => buildPacket(index().get(k), sel || {}), related: (k) => related(index().get(k)).map(r => ({ key: r.o.key, relation: r.relation, confidence: r.confidence, kind: r.o.kind })),
   localAnalysis: (k) => { const o = index().get(k); return localAnalysis(o, buildPacket(o, {}).packet); } };
 };
