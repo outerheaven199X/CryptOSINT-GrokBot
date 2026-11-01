@@ -21,6 +21,13 @@ def res(name, cond, info=""):
 def shot(pg, name):
     if SHOTS: SHOTS.mkdir(parents=True, exist_ok=True); pg.screenshot(path=str(SHOTS / name))
 def T(pg, sel): return pg.evaluate("(s) => { const e = document.querySelector(s); return e ? e.innerText : '' }", sel)
+def E(pg, js, arg=None):
+    """evaluate, but a missing API (e.g. running this suite against 0.3.0) is a FAIL, not a crash"""
+    try: return pg.evaluate(js, arg)
+    except Exception as e: return {"__error": str(e)[:160]}
+def g_(d, *ks):
+    for k in ks: d = d.get(k) if isinstance(d, dict) else None
+    return d
 def boot(pg, url): pg.goto(url); pg.wait_for_function("() => window.GTB && GTB.ready && GTB.inv", timeout=30000); pg.wait_for_timeout(600)
 def harness(state, fixtures=None):
     p = subprocess.Popen(["node", str(R / "tests/ui/inv_harness.mjs"), "--state", state, "--key", "0"] + (["--fixtures", fixtures] if fixtures else []), stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True, cwd=str(R))
@@ -47,8 +54,8 @@ with sync_playwright() as pw:
         pv = pg.evaluate("() => [...document.querySelectorAll('#pulseReal [data-pkey]')].map(e => e.dataset.prov)")
         res("no refresh: Real observations are ungrouped and all labelled cached (bundled snapshot)", pv and set(pv) == {"cached"} and pg.locator("#pulseReal [data-group]").count() == 0, set(pv))
         res("no refresh: no Refreshed readings card", pg.locator("#pulseReadings").count() == 0)
-        ds = pg.evaluate("() => GTB.inv.dataStatus('fx:EUR/TRY:CHECKS')")
-        res("no refresh: data status is real-cached-bundled with the provider date, not live", ds and ds["status"] == "real-cached-bundled" and ds["sourceAsOf"] and "live" not in ds["label"], ds)
+        ds = E(pg, "() => GTB.inv.dataStatus('fx:EUR/TRY:CHECKS')")
+        res("no refresh: data status is real-cached-bundled with the provider date, not live", g_(ds, "status") == "real-cached-bundled" and g_(ds, "sourceAsOf") and "live" not in g_(ds, "label"), ds)
         g = pg.evaluate(FOOT)
         res("fix 2: 1280x720 footer <=130px (was 180), panel >=330px (was 283), text 11px", g["f"] <= 130 and g["p"] >= 330 and g["font"] == "11px", g)
         res("fix 2: 1280x720 full not-financial-advice text, label visible, all three links, no overflow", "NOT FINANCIAL ADVICE" in g["text"].upper() and NFA_END in g["text"] and "not financial" in g["text"] and g["nfaVis"] and len(g["links"]) == 3 and g["ox"] <= 0 and g["pinside"] and g["fb"] <= 720, g)
@@ -59,7 +66,7 @@ with sync_playwright() as pw:
         pg.set_viewport_size({"width": 1440, "height": 900}); pg.wait_for_timeout(250); g = pg.evaluate(FOOT)
         res("fix 2: tall desktop (1440x900) keeps the original v6 footer layout", g["f"] >= 140 and pg.evaluate("() => getComputedStyle(document.querySelector('footer')).display") == "flex", g)
         pg.evaluate("() => GTB.inv.open('fx:EUR/TRY:CHECKS')"); pg.wait_for_timeout(400)
-        res("fix 3: investigation rail shows the data status (bundled snapshot) next to the kind", pg.evaluate("() => document.getElementById('invDataStatus').dataset.status") == "real-cached-bundled" and pg.evaluate("() => document.getElementById('invKind').dataset.kind") == "real-cached")
+        res("fix 3: investigation rail shows the data status (bundled snapshot) next to the kind", E(pg, "() => document.getElementById('invDataStatus').dataset.status") == "real-cached-bundled" and pg.evaluate("() => document.getElementById('invKind').dataset.kind") == "real-cached")
         ctx.close()
         for w, h in [(390, 844), (375, 667), (320, 568)]:
             ctx = b.new_context(viewport={"width": w, "height": h}, is_mobile=True, has_touch=True); pg = ctx.new_page(); boot(pg, url); pg.evaluate("() => GTB.go('pulse')"); pg.wait_for_timeout(400)
@@ -98,10 +105,10 @@ with sync_playwright() as pw:
         KF = pg.evaluate("() => [...GTB.inv.index().values()].find(o => o.stableId === 'fx:EUR/TRY' && !o.quiet).key")
         KQ = pg.evaluate("() => [...GTB.inv.index().values()].find(o => o.module === 'fx' && o.quiet && o.severity === 'NONE' && o.set === 'live').key")
         pg.evaluate("(k) => GTB.inv.open(k)", KF); pg.wait_for_timeout(600)
-        res("fix 3: investigation rail shows the FIXTURE data status after a fixture refresh", pg.evaluate("() => (document.getElementById('invDataStatus') || { dataset: {} }).dataset.status") == "fixture-replay")
-        dj = pg.evaluate("(k) => GTB.inv.dossier(k).then(x => x.json)", KF)
-        res("fix 3: FIXTURE case file: dataStatus fixture-replay, kind fixture-test, provider date and run id", dj["evidence"]["dataStatus"] == "fixture-replay" and dj["evidence"]["observed"] == "fixture-test" and dj["evidence"]["sourceAsOf"] == "2026-10-30" and dj["evidence"]["refreshRun"] == dj["snapshot"]["runId"], dj["evidence"])
-        mx = pg.evaluate("""(K) => { const E = GTB.EV, cov = E.live.coverage.find(c => c.module === 'fx'), sig = GTB_EV.EV_SIGS.find(x => x.s.key === K).s, ds = () => GTB.inv.dataStatus(K);
+        res("fix 3: investigation rail shows the FIXTURE data status after a fixture refresh", E(pg, "() => (document.getElementById('invDataStatus') || { dataset: {} }).dataset.status") == "fixture-replay")
+        dj = E(pg, "(k) => GTB.inv.dossier(k).then(x => x.json)", KF)
+        res("fix 3: FIXTURE case file: dataStatus fixture-replay, kind fixture-test, provider date and run id", g_(dj, "evidence", "dataStatus") == "fixture-replay" and g_(dj, "evidence", "observed") == "fixture-test" and g_(dj, "evidence", "sourceAsOf") == "2026-10-30" and g_(dj, "evidence", "refreshRun") == g_(dj, "snapshot", "runId"), g_(dj, "evidence"))
+        mx = E(pg, """(K) => { const E = GTB.EV, cov = E.live.coverage.find(c => c.module === 'fx'), sig = GTB_EV.EV_SIGS.find(x => x.s.key === K).s, ds = () => GTB.inv.dataStatus(K);
           const out = {}; const keep = [E.refreshed.fixture, cov.freshness, sig.ingestedAt];
           const sfx = sig.fixture; delete sig.fixture; E.refreshed.fixture = false; cov.freshness = 'fresh'; out.fresh = ds();
           cov.freshness = 'upstream-stale'; out.upstream = ds();
@@ -113,16 +120,17 @@ with sync_playwright() as pw:
           E.refreshed.fixture = false; sig.fixture = sfx; out.sigFixture = ds();
           E.refreshed.fixture = false; return out; }""", KQ)
         want = {"fresh": "real-live-refreshed", "upstream": "real-stale-upstream", "carried": "real-stale-carried", "unavailable": "real-unavailable", "aged": "real-stale-aged", "bundled": "real-cached-bundled", "fixture": "fixture-replay", "sigFixture": "fixture-replay"}
+        if "__error" in mx: mx = {k: {"status": None, "label": "", "sourceAsOf": None} for k in want}
         res("fix 3: data status follows the source freshness exactly (fresh/upstream-stale/carried/unavailable/aged/bundled/fixture)", {k: v["status"] for k, v in mx.items()} == want, {k: v["status"] for k, v in mx.items()})
         res("fix 3: only a fresh, non-fixture, in-cadence reading is ever called live; every stale state says stale/not fresh", "live-refreshed" in mx["fresh"]["label"] and all("live-refreshed" not in mx[k]["label"] and mx[k]["status"] != "real-live-refreshed" for k in want if k != "fresh") and all("stale" in mx[k]["label"] for k in ("upstream", "carried")) and "not fresh" in mx["aged"]["label"], {k: v["label"][:90] for k, v in mx.items()})
         res("fix 3: every status carries the provider as-of date", all(v["sourceAsOf"] == "2026-10-30" for v in mx.values()), {k: v["sourceAsOf"] for k, v in mx.items()})
         # the simulated live-refreshed state (fixture flag cleared in-page above) exports with the right label in the HTML too
         pg.evaluate("(k) => { const c = GTB.EV.live.coverage.find(c => c.module === 'fx'); c.freshness = 'fresh'; delete GTB_EV.EV_SIGS.find(x => x.s.key === k).s.fixture; }", KQ)
-        h = pg.evaluate("(k) => GTB.inv.dossier(k).then(x => ({ ht: x.html, ev: x.json.evidence }))", KQ)
-        res("fix 3: case-file HTML 'Data' row shows the live-refreshed status with the provider date (not 'real-cached')", h["ev"]["dataStatus"] == "real-live-refreshed" and "<th>Data</th><td>real data, live-refreshed" in h["ht"] and "provider as of 2026-10-30" in h["ht"] and "<th>Data</th><td>real-cached</td>" not in h["ht"], h["ev"])
+        h = E(pg, "(k) => GTB.inv.dossier(k).then(x => ({ ht: x.html, ev: x.json.evidence }))", KQ); h = h if "ht" in h else {"ht": "", "ev": {}}
+        res("fix 3: case-file HTML 'Data' row shows the live-refreshed status with the provider date (not 'real-cached')", h["ev"].get("dataStatus") == "real-live-refreshed" and "<th>Data</th><td>real data, live-refreshed" in h["ht"] and "provider as of 2026-10-30" in h["ht"] and "<th>Data</th><td>real-cached</td>" not in h["ht"], h["ev"])
         pg.evaluate("() => { const c = GTB.EV.live.coverage.find(c => c.module === 'fx'); c.freshness = 'upstream-stale'; }")
-        h = pg.evaluate("(k) => GTB.inv.dossier(k).then(x => ({ ht: x.html, ev: x.json.evidence }))", KQ)
-        res("fix 3: stale upstream exports as stale, never fresh or live", h["ev"]["dataStatus"] == "real-stale-upstream" and "stale upstream" in h["ht"] and "live-refreshed" not in h["ht"], h["ev"])
+        h = E(pg, "(k) => GTB.inv.dossier(k).then(x => ({ ht: x.html, ev: x.json.evidence }))", KQ); h = h if "ht" in h else {"ht": "", "ev": {}}
+        res("fix 3: stale upstream exports as stale, never fresh or live", h["ev"].get("dataStatus") == "real-stale-upstream" and "stale upstream" in h["ht"] and "live-refreshed" not in h["ht"], h["ev"])
         ctx.close()
         ctx = b.new_context(viewport={"width": 390, "height": 844}, is_mobile=True, has_touch=True); pg = ctx.new_page(); boot(pg, url); pg.evaluate("() => GTB.go('pulse')"); pg.wait_for_timeout(500)
         top = pg.evaluate("() => { const r = document.querySelector('#pulseReal [data-inv]'); return r ? r.getBoundingClientRect().top : 9999 }")
