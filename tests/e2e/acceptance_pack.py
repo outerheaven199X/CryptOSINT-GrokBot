@@ -35,7 +35,9 @@ def launch(extra=None):
         l = p.stdout.readline(); lines.append(l)
         m = re.search(r"http://127\.0\.0\.1:\d+/", l)
         if m:
-            for _ in range(3): lines.append(p.stdout.readline())   # preview notice, fixture-mode line (if any), Grok status
+            for _ in range(4):                                      # preview notice, fixture-mode line (if any), then the Grok status line
+                l = p.stdout.readline(); lines.append(l)
+                if l.startswith("Grok") or not l: break
             return p, m.group(0), lines
     raise SystemExit("launcher did not start: " + "".join(lines))
 def stop(p):
